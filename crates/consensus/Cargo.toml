@@ -1,0 +1,14 @@
+[package]
+version = "0.1.0"
+edition = "2021"
+name = "gnomon-consensus"
+description = "Embedded Raft (openraft) over the FSM: replicated event log, leader election, failover"
+[dependencies]
+gnomon-core = { path = "../core" }
+gnomon-fsm = { path = "../fsm" }
+openraft = { version = "0.9", features = ["serde"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+anyhow = "1"
+async-trait = "0.1"

@@ -1,0 +1,15 @@
+[package]
+version = "0.1.0"
+edition = "2021"
+name = "gnomon-api"
+description = "gRPC API tier (tonic): lock-free snapshot reads, index-aware consistency"
+[dependencies]
+gnomon-core = { path = "../core" }
+gnomon-fsm = { path = "../fsm" }
+gnomon-sched = { path = "../sched" }
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+[build-dependencies]
+tonic-build = "0.12"

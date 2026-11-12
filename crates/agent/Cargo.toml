@@ -1,0 +1,11 @@
+[package]
+version = "0.1.0"
+edition = "2021"
+name = "gnomon-agent"
+description = "Node agent: CDI resource discovery, registration, heartbeats, job launch"
+[dependencies]
+gnomon-api = { path = "../api" }
+gnomon-core = { path = "../core" }
+tonic = "0.12"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"

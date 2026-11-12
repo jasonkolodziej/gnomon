@@ -1,0 +1,319 @@
+//! The replicated state machine (report section 4.1).
+//!
+//! All cluster state lives here. Mutations arrive as ordered [`Event`]s —
+//! in production, committed entries from an embedded Raft log (`openraft`);
+//! this crate is deliberately Raft-agnostic so the consensus crate can be
+//! swapped without touching state logic. Reads are served from immutable
+//! snapshots, so the API tier and the scheduler workers never take a lock
+//! that a writer holds — the structural fix for Slurm's `slurmctld` mutex
+//! contention.
+//!
+//! Time comes from an injected [`Clock`], and every applied event can be
+//! journaled, so the state is a deterministic function of (initial state,
+//! event log): the basis for exact replay (`gnomon-sim`).
+
+use gnomon_core::{Assignment, Clock, Event, Job, JobId, JobState, NodeInfo, Resources, StateIndex, SystemClock};
+use gnomon_graph::{ResourceGraph, VertexId, VertexKind};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+
+/// The committed state. Cloned (cheaply, at skeleton scale) into snapshots;
+/// a production version uses persistent/im-style data structures.
+#[derive(Clone, Debug, Default)]
+pub struct State {
+    pub jobs: BTreeMap<JobId, Job>,
+    pub graph: ResourceGraph,
+    /// Live node agents, keyed by name (phase 4).
+    pub nodes: BTreeMap<String, NodeInfo>,
+    /// Work queued per node for FetchWork (phase 4).
+    pub assignments: BTreeMap<String, Vec<Assignment>>,
+    next_job_id: u64,
+}
+
+impl State {
+    pub fn pending_jobs(&self) -> impl Iterator<Item = &Job> {
+        self.jobs.values().filter(|j| j.state == JobState::Pending)
+    }
+}
+
+/// Immutable point-in-time view handed to scheduler workers and the API.
+#[derive(Clone)]
+pub struct Snapshot {
+    pub index: StateIndex,
+    /// Clock reading when the snapshot was taken: plans are pure functions
+    /// of (state, now), which is what makes them replayable.
+    pub now: u64,
+    inner: Arc<State>,
+}
+
+impl Snapshot {
+    pub fn state(&self) -> &State { &self.inner }
+    pub fn job(&self, id: JobId) -> Option<&Job> { self.inner.jobs.get(&id) }
+    pub fn pending_jobs(&self) -> impl Iterator<Item = &Job> { self.inner.pending_jobs() }
+    pub fn graph(&self) -> &ResourceGraph { &self.inner.graph }
+    pub fn node(&self, name: &str) -> Option<&NodeInfo> { self.inner.nodes.get(name) }
+    pub fn nodes(&self) -> impl Iterator<Item = &NodeInfo> { self.inner.nodes.values() }
+}
+
+/// One journaled event with the clock reading it was applied at — enough to
+/// reproduce state exactly (`gnomon-sim` replays these).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct JournalEntry {
+    pub at: u64,
+    pub event: Event,
+}
+
+/// Result of applying one event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Applied {
+    pub index: StateIndex,
+    /// False when a start/reserve was rejected (job no longer pending, or
+    /// commit-time revalidation failed). The event is still logged — Raft
+    /// entries are immutable — but it had no effect on state.
+    pub accepted: bool,
+}
+
+pub struct Fsm {
+    state: RwLock<State>,
+    index: AtomicU64,
+    clock: Arc<dyn Clock>,
+    journal: Option<Mutex<Vec<JournalEntry>>>,
+}
+
+impl Default for Fsm {
+    fn default() -> Self { Self::new() }
+}
+
+impl Fsm {
+    pub fn new() -> Self { Self::with_clock(Arc::new(SystemClock)) }
+
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
+        Fsm { state: RwLock::new(State::default()), index: AtomicU64::new(0), clock, journal: None }
+    }
+
+    /// Like [`Fsm::with_clock`], but records every applied event in order.
+    pub fn recording(clock: Arc<dyn Clock>) -> Self {
+        Fsm { journal: Some(Mutex::new(Vec::new())), ..Self::with_clock(clock) }
+    }
+
+    pub fn now(&self) -> u64 { self.clock.now() }
+    pub fn clock(&self) -> &Arc<dyn Clock> { &self.clock }
+
+    /// The journal so far (empty unless created with [`Fsm::recording`]).
+    pub fn journal(&self) -> Vec<JournalEntry> {
+        self.journal.as_ref().map(|j| j.lock().unwrap().clone()).unwrap_or_default()
+    }
+
+    /// Current Raft-style index.
+    pub fn index(&self) -> StateIndex { self.index.load(Ordering::Acquire) }
+
+    /// Immutable snapshot; the read path for API handlers and workers.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            index: self.index(),
+            now: self.now(),
+            inner: Arc::new(self.state.read().unwrap().clone()),
+        }
+    }
+
+    /// Borrow live state under a read lock without cloning (single-writer
+    /// loops such as the scheduling pass and the simulator).
+    pub fn read<R>(&self, f: impl FnOnce(&State) -> R) -> R {
+        f(&self.state.read().unwrap())
+    }
+
+    /// Apply one event in log order. Returns the new index.
+    pub fn apply(&self, ev: Event) -> StateIndex { self.apply_with_expect(ev, &[]).index }
+
+    pub fn apply_checked(&self, ev: Event) -> Applied { self.apply_with_expect(ev, &[]) }
+
+    /// Apply with the plan's per-vertex read set (leader-side fast path; the
+    /// journaled event is identical, followers simply revalidate).
+    pub fn apply_with_expect(&self, ev: Event, expect: &[(VertexId, u64)]) -> Applied {
+        let now = self.now();
+        let mut st = self.state.write().unwrap();
+        if let Some(j) = &self.journal { j.lock().unwrap().push(JournalEntry { at: now, event: ev.clone() }); }
+        let accepted = apply_event(&mut st, &ev, expect, now);
+        let index = self.index.fetch_add(1, Ordering::AcqRel) + 1;
+        Applied { index, accepted }
+    }
+
+    pub fn next_job_id(&self) -> JobId {
+        JobId(self.state.read().unwrap().next_job_id)
+    }
+}
+
+fn place(st: &mut State, job: JobId, vertices: &[VertexId], start: u64, dur: Option<u64>,
+         expect: &[(VertexId, u64)], now: u64, reserve_only: bool) -> bool {
+    let (req, d) = match st.jobs.get(&job) {
+        Some(j) if j.state == JobState::Pending => (j.request, dur.unwrap_or(j.walltime.0.as_secs())),
+        _ => return false, // already placed / cancelled / unknown: reject
+    };
+    if !st.graph.commit_job(vertices, &req, start, d, Some(job.0), expect) {
+        return false;
+    }
+    let running = !reserve_only && start <= now;
+    let j = st.jobs.get_mut(&job).unwrap();
+    j.state = if running { JobState::Running } else { JobState::Reserved };
+    j.planned_start = Some(start);
+    j.planned_dur = Some(d);
+    if running {
+        // Phase 4: enqueue executable work for the owning agent.
+        let cmd = j.command.clone();
+        for &v in vertices {
+            if let Some(vx) = st.graph.vertices.get(v as usize) {
+                let node = vx.name.clone();
+                st.assignments.entry(node).or_default().push(Assignment { job, command: cmd.clone(), start });
+            }
+        }
+    }
+    true
+}
+
+fn apply_event(st: &mut State, ev: &Event, expect: &[(VertexId, u64)], now: u64) -> bool {
+    match ev {
+        Event::JobSubmitted(job) => {
+            let mut job = job.clone();
+            st.next_job_id = st.next_job_id.max(job.id.0 + 1);
+            job.state = JobState::Pending;
+            st.jobs.insert(job.id, job);
+        }
+        Event::JobCancelled(id) => {
+            if let Some(j) = st.jobs.get_mut(id) {
+                if matches!(j.state, JobState::Pending | JobState::Reserved) {
+                    j.state = JobState::Cancelled;
+                    st.graph.release_job(id.0, 0);
+                }
+            }
+        }
+        Event::JobStarted { job, vertices, start, dur } => {
+            return place(st, *job, vertices, *start, *dur, expect, now, false);
+        }
+        Event::JobReserved { job, vertices, start, dur } => {
+            return place(st, *job, vertices, *start, *dur, expect, now, true);
+        }
+        Event::JobFinished { job, end, code } => {
+            if let Some(j) = st.jobs.get_mut(job) {
+                j.state = if *code == 0 { JobState::Completed } else { JobState::Failed };
+            }
+            st.graph.release_job(job.0, *end);
+        }
+        Event::JobExtended { job, new_end } => {
+            st.graph.extend_job(job.0, *new_end);
+            if let Some(j) = st.jobs.get_mut(job) {
+                if let Some(s) = j.planned_start { j.planned_dur = Some(new_end.saturating_sub(s)); }
+            }
+        }
+        Event::ReservationsCleared { .. } => {
+            let reserved: Vec<JobId> = st.jobs.values()
+                .filter(|j| j.state == JobState::Reserved).map(|j| j.id).collect();
+            for id in reserved {
+                st.graph.release_job(id.0, 0);
+                let j = st.jobs.get_mut(&id).unwrap();
+                j.state = JobState::Pending;
+                j.planned_start = None;
+                j.planned_dur = None;
+            }
+        }
+        Event::NodeRegistered { name, capacity } => {
+            if st.graph.by_name(name).is_none() {
+                let root = ensure_cluster_root(&mut st.graph);
+                st.graph.add_vertex(VertexKind::Node, name, *capacity, Some(root));
+            }
+            let info = st.nodes.entry(name.clone()).or_default();
+            info.name = name.clone();
+            info.capacity = *capacity;
+            info.last_heartbeat = now;
+        }
+        Event::AssignmentsFetched { node, count } => {
+            if let Some(q) = st.assignments.get_mut(node) {
+                let n = (*count).min(q.len());
+                q.drain(..n);
+            }
+        }
+        Event::NodeProfileSet { name, profile } => {
+            match st.graph.by_name(name) {
+                Some(id) => st.graph.set_profile(id, profile.clone()),
+                None => return false,
+            }
+        }
+        Event::Heartbeat { name, allocated } => {
+            if let Some(info) = st.nodes.get_mut(name) {
+                info.last_heartbeat = now;
+                info.allocated = *allocated;
+            }
+        }
+    }
+    true
+}
+
+fn ensure_cluster_root(g: &mut ResourceGraph) -> VertexId {
+    g.by_name("cluster").unwrap_or_else(|| {
+        g.add_vertex(VertexKind::Cluster, "cluster", Resources::default(), None)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gnomon_core::{ManualClock, Walltime};
+    use std::time::Duration;
+
+    fn setup() -> (Arc<ManualClock>, Fsm) {
+        let clock = Arc::new(ManualClock::new(1000));
+        let fsm = Fsm::recording(clock.clone());
+        fsm.apply(Event::NodeRegistered { name: "n0".into(),
+            capacity: Resources { cores: 4, mem_mb: 0, gpus: 0 } });
+        (clock, fsm)
+    }
+
+    fn job(id: u64, cores: u32, wall: u64) -> Job {
+        Job::new(JobId(id), "j", "u", Resources { cores, mem_mb: 0, gpus: 0 },
+                 Walltime(Duration::from_secs(wall)))
+    }
+
+    #[test]
+    fn double_start_of_same_job_is_rejected() {
+        let (_c, fsm) = setup();
+        fsm.apply(Event::JobSubmitted(job(1, 1, 100)));
+        let ev = Event::JobStarted { job: JobId(1), vertices: vec![1], start: 1000, dur: None };
+        assert!(fsm.apply_checked(ev.clone()).accepted);
+        assert!(!fsm.apply_checked(ev).accepted, "a job must never be placed twice");
+    }
+
+    #[test]
+    fn early_finish_frees_the_rest_of_the_window() {
+        let (clock, fsm) = setup();
+        fsm.apply(Event::JobSubmitted(job(1, 4, 1000)));
+        fsm.apply(Event::JobStarted { job: JobId(1), vertices: vec![1], start: 1000, dur: None });
+        clock.set(1100);
+        fsm.apply(Event::JobFinished { job: JobId(1), end: 1100, code: 0 });
+        let fit = fsm.read(|s| s.graph.vertex(1).earliest_fit(
+            &Resources { cores: 4, mem_mb: 0, gpus: 0 }, 1100, 50));
+        assert_eq!(fit, Some(1100));
+    }
+
+    #[test]
+    fn journal_replays_to_identical_state() {
+        let (clock, fsm) = setup();
+        fsm.apply(Event::JobSubmitted(job(1, 2, 100)));
+        fsm.apply(Event::JobSubmitted(job(2, 4, 100)));
+        fsm.apply(Event::JobStarted { job: JobId(1), vertices: vec![1], start: 1000, dur: Some(50) });
+        fsm.apply(Event::JobReserved { job: JobId(2), vertices: vec![1], start: 1050, dur: None });
+        clock.set(1040);
+        fsm.apply(Event::JobFinished { job: JobId(1), end: 1040, code: 0 });
+        fsm.apply(Event::ReservationsCleared { now: 1040 });
+
+        // Replay the journal into a fresh FSM driven by the same clock values.
+        let c2 = Arc::new(ManualClock::new(1000));
+        let replica = Fsm::with_clock(c2.clone());
+        for e in fsm.journal() {
+            c2.set(e.at);
+            replica.apply(e.event);
+        }
+        let a = fsm.read(|s| (s.jobs.clone(), format!("{:?}", s.graph)));
+        let b = replica.read(|s| (s.jobs.clone(), format!("{:?}", s.graph)));
+        assert_eq!(a, b);
+    }
+}

@@ -1,0 +1,9 @@
+[package]
+version = "0.1.0"
+edition = "2021"
+name = "gnomon-fsm"
+description = "In-memory replicated state machine: Raft-agnostic apply + immutable snapshots"
+[dependencies]
+gnomon-core = { path = "../core" }
+gnomon-graph = { path = "../graph" }
+serde = { version = "1", features = ["derive"] }

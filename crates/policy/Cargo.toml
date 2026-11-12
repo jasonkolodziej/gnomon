@@ -1,0 +1,11 @@
+[package]
+version = "0.1.0"
+edition = "2021"
+name = "gnomon-policy"
+description = "Policy-as-data: fairshare/QoS/limits config + wasmtime-sandboxed priority plugins"
+[dependencies]
+gnomon-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasmtime = "25"
+anyhow = "1"
