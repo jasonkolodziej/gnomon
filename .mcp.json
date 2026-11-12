@@ -1,0 +1,114 @@
+{
+  "mcpServers": {
+    "github-mcp-server": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "tools": [
+        "*"
+      ],
+      "headers": {
+        "X-MCP-Toolsets": "repos,issues,users,pull_requests,code_security,secret_protection,actions,web_search"
+      }
+    },
+    "cloudflare-documentation": {
+      "type": "sse",
+      "url": "https://docs.mcp.cloudflare.com/sse",
+      "tools": [
+        "*"
+      ]
+    },
+    "cloudflare-api": {
+      "type": "http",
+      "url": "https://mcp.cloudflare.com/mcp",
+      "tools": [
+        "*"
+      ],
+      "headers": {
+        "Authorization": "Bearer ${COPILOT_MCP_CLOUDFLARE_API_TOKEN}"
+      }
+    },
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "tools": [
+        "query-docs",
+        "resolve-library-id"
+      ],
+      "headers": {
+        "CONTEXT7_API_KEY": "${COPILOT_MCP_CONTEXT7_API_KEY}"
+      }
+    },
+    "svelte": {
+      "type": "local",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@sveltejs/mcp"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    "playwright": {
+      "type": "local",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    "tailwindcss-server": {
+      "type": "local",
+      "command": "npx",
+      "args": [
+        "-y",
+        "tailwindcss-mcp-server"
+      ],
+      "tools": [
+        "*"
+      ]
+    },
+    "shadcn-ui-svelte": {
+      "type": "local",
+      "command": "npx",
+      "args": [
+        "@jpisnice/shadcn-ui-mcp-server",
+        "--framework",
+        "svelte"
+      ],
+      "tools": [
+        "*"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${COPILOT_MCP_SHADCN_SVELTE}"
+      }
+    },
+    "better-auth": {
+      "type": "http",
+      "url": "https://mcp.better-auth.com/mcp",
+      "tools": [
+        "*"
+      ]
+    },
+    "deepwiki": {
+      "type": "http",
+      "url": "https://mcp.deepwiki.com/mcp",
+      "tools": [
+        "*"
+      ]
+    },
+    "graphify": {
+      "type": "stdio",
+      "command": "graphify-mcp",
+      "args": [
+        "graphify-out/graph.json"
+      ],
+      "tools": [
+        "*"
+      ]
+    }
+  }
+}

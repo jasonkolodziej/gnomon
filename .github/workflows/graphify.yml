@@ -1,0 +1,193 @@
+name: Graphify
+
+# Keeps the repository's graphify knowledge graph in ./graphify-out/ current. The graph covers
+# every directory listed in .github/graphify/targets.txt (several targets are built into
+# <dir>/graphify-out/ and merged). See GRAPHIFY.md for setup and options.
+#
+#   push to main       rebuild only the targets whose files changed, commit the result
+#   pull_request       rebuild changed targets and upload them as an artifact (no commit)
+#   workflow_dispatch  rebuild chosen (or all) targets on demand, optionally publish to Pages
+#
+# Repository variables (Settings → Secrets and variables → Actions → Variables):
+#   GRAPHIFY_MODE     code-only (default) | full: default extraction mode
+#   GRAPHIFY_BACKEND  force an LLM backend for full mode (claude, openai, gemini, ...)
+#   GRAPHIFY_VERSION  pin the graphifyy package version (e.g. 1.2.3); blank = latest
+#   GRAPHIFY_PAGES    "true" to publish graphs to GitHub Pages after each main build
+# Repository secrets (only needed for full mode): ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**/graphify-out/**"
+  pull_request:
+    paths-ignore:
+      - "**/graphify-out/**"
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "Directories to rebuild, space-separated (blank = every target in .github/graphify/targets.txt)"
+        required: false
+        default: ""
+      mode:
+        description: "Extraction mode (default = per-target column, then the GRAPHIFY_MODE variable)"
+        type: choice
+        options:
+          - default
+          - code-only
+          - full
+        default: default
+      publish-pages:
+        description: "Publish the graphs to GitHub Pages (default branch only)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: graphify-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build knowledge graphs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      pages: ${{ steps.site.outputs.built }}
+    env:
+      GRAPHIFY_MODE: ${{ vars.GRAPHIFY_MODE || 'code-only' }}
+      # Fork PRs get no secrets, so force backend "none" there: a configured backend name
+      # without its key would otherwise attempt semantic extraction instead of code-only.
+      GRAPHIFY_BACKEND: >-
+        ${{ (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name != github.repository) &&
+        'none' || vars.GRAPHIFY_BACKEND }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install graphify
+        env:
+          GRAPHIFY_VERSION: ${{ vars.GRAPHIFY_VERSION }}
+        run: |
+          # LLM client extras so "full" mode works with any of the documented API-key secrets.
+          python -m pip install --disable-pip-version-check \
+            "graphifyy[anthropic,openai,gemini]${GRAPHIFY_VERSION:+==${GRAPHIFY_VERSION}}"
+          graphify --version
+
+      - name: Rebuild graphs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          INPUT_TARGETS: ${{ inputs.targets }}
+          INPUT_MODE: ${{ inputs.mode }}
+        run: |
+          # Unset empty variables so graphify does not mistake "" for a configured backend.
+          for v in GRAPHIFY_BACKEND ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY; do
+            [ -n "${!v:-}" ] || unset "$v"
+          done
+
+          args=()
+          case "${INPUT_MODE:-}" in
+            code-only | full) args+=("--${INPUT_MODE}") ;;
+          esac
+          case "$EVENT_NAME" in
+            push) args+=(--changed "$PUSH_BEFORE") ;;
+            pull_request) args+=(--changed "$PR_BASE") ;;
+          esac
+          read -r -a dirs <<<"${INPUT_TARGETS:-}"
+
+          bash .github/graphify/update.sh "${args[@]}" "${dirs[@]}"
+
+      # Uses graphify's default location (no --graph), as agents and MCP clients will.
+      - name: Smoke-test the root graph
+        run: |
+          if [ ! -f graphify-out/graph.json ]; then
+            echo "No graphify-out/graph.json (no targets configured?): skipping."
+            exit 0
+          fi
+          graphify god-nodes --top 5
+
+      - name: Upload graphs for review
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphify-out
+          path: |
+            **/graphify-out/
+            !**/graphify-out/cache/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Commit updated graphs
+        if: github.event_name != 'pull_request'
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          graphs=':(glob)**/graphify-out/**'
+          # `git add` fails on a pathspec that matches nothing, so check status first.
+          if [ -z "$(git status --porcelain -- "$graphs")" ]; then
+            echo "No graph changes to commit."
+            exit 0
+          fi
+          git add -A -- "$graphs"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(graphify): update knowledge graphs [skip ci]"
+          # Retry in case another workflow (e.g. the one-time setup) pushed meanwhile.
+          for attempt in 1 2 3; do
+            if git pull --rebase origin "$BRANCH" && git push origin "HEAD:${BRANCH}"; then
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          echo "::error::Could not push graph updates to ${BRANCH}. If the branch is protected, see GRAPHIFY.md."
+          exit 1
+
+      - name: Build Pages site
+        id: site
+        if: >-
+          github.event_name != 'pull_request' &&
+          github.ref_name == github.event.repository.default_branch &&
+          (vars.GRAPHIFY_PAGES == 'true' || inputs.publish-pages)
+        run: |
+          python .github/graphify/build_site.py _site
+          echo "built=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Pages artifact
+        if: steps.site.outputs.built == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  pages:
+    name: Publish to GitHub Pages
+    needs: build
+    if: needs.build.outputs.pages == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

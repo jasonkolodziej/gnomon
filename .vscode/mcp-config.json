@@ -1,0 +1,54 @@
+{
+  "mcpServers": {
+    "github-mcp-server": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/readonly",
+      "tools": ["*"],
+      "headers": {
+        "X-MCP-Toolsets": "repos,issues,users,pull_requests,code_security,secret_protection,actions,web_search"
+      }
+    },
+    "cloudflare-documentation": {
+      "type": "sse",
+      "url": "https://docs.mcp.cloudflare.com/sse",
+      "tools": ["*"]
+    },
+    "svelte": {
+      "type": "local",
+      "command": "npx",
+      "args": ["-y", "@sveltejs/mcp"],
+      "tools": ["*"]
+    },
+    "tailwindcss-server": {
+      "type": "local",
+      "tools": ["*"],
+      "command": "npx",
+      "args": ["-y", "tailwindcss-mcp-server"]
+    },
+    "shadcn-ui-svelte": {
+      "type": "local",
+      "command": "npx",
+      "args": ["@jpisnice/shadcn-ui-mcp-server", "--framework", "svelte"],
+      "tools": ["*"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "COPILOT_MCP_SHADCN_SVELTE"
+      }
+    },
+    "better-auth": {
+      "type": "http",
+      "tools": ["*"],
+      "url": "https://mcp.better-auth.com/mcp"
+    },
+    "deepwiki": {
+      "type": "http",
+      "tools": ["*"],
+      "url": "https://mcp.deepwiki.com/mcp"
+    },
+    "graphify": {
+      "type": "local",
+      "command": "graphify-mcp",
+      "args": ["graphify-out/graph.json"],
+      "tools": ["*"]
+    }
+  }
+}

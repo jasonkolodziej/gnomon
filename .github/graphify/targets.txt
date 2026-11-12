@@ -1,0 +1,22 @@
+# Directories included in the repository's graphify knowledge graph (./graphify-out/).
+#
+# One directory per line, relative to the repository root. With one target it is built
+# straight into ./graphify-out/. With several, each is built into <dir>/graphify-out/
+# and they are merged into ./graphify-out/graph.json.
+#
+# Optional second column: extraction mode for that directory.
+#   code-only  local AST only: no API key, nothing leaves the machine (default)
+#   full       also sends docs, papers and images to an LLM backend for semantic
+#              extraction. Needs an API key (ANTHROPIC_API_KEY, OPENAI_API_KEY,
+#              GEMINI_API_KEY, ...). Without a key the build falls back to code-only.
+#
+# Use "." for the whole repository (see .graphifyignore for what is skipped).
+#
+# Examples:
+#   src
+#   services/api      code-only
+#   docs              full
+
+# Template test target: the bundled agent skills (mostly Markdown, so "full" gives a
+# much richer graph when an API key is configured).
+skills  full

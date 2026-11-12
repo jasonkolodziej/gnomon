@@ -1,0 +1,290 @@
+{
+  "communities": {
+    "0": [
+      "ref_cloudflare_workers_types",
+      "ref_node_child_process",
+      "ref_node_fs",
+      "ref_typescript",
+      "ref_vitest",
+      "ref_wrangler",
+      "turnstile_spin_templates_worker_package",
+      "turnstile_spin_templates_worker_package_description",
+      "turnstile_spin_templates_worker_package_devdependencies",
+      "turnstile_spin_templates_worker_package_devdependencies_cloudflare_workers_types",
+      "turnstile_spin_templates_worker_package_devdependencies_typescript",
+      "turnstile_spin_templates_worker_package_devdependencies_vitest",
+      "turnstile_spin_templates_worker_package_devdependencies_wrangler",
+      "turnstile_spin_templates_worker_package_keywords",
+      "turnstile_spin_templates_worker_package_license",
+      "turnstile_spin_templates_worker_package_main",
+      "turnstile_spin_templates_worker_package_name",
+      "turnstile_spin_templates_worker_package_private",
+      "turnstile_spin_templates_worker_package_type",
+      "turnstile_spin_templates_worker_package_version",
+      "turnstile_spin_templates_worker_test_deploy_test",
+      "turnstile_spin_templates_worker_test_deploy_test_has_creds",
+      "turnstile_spin_templates_worker_vitest_config"
+    ],
+    "1": [
+      "turnstile_spin_templates_worker_tsconfig",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_allowjs",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_esmoduleinterop",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_forceconsistentcasinginfilenames",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_isolatedmodules",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_lib",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_module",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_moduleresolution",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_noemit",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_nofallthroughcasesinswitch",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_noimplicitany",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_nounusedlocals",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_nounusedparameters",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_resolvejsonmodule",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_skiplibcheck",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_strict",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_strictnullchecks",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_target",
+      "turnstile_spin_templates_worker_tsconfig_compileroptions_types",
+      "turnstile_spin_templates_worker_tsconfig_exclude",
+      "turnstile_spin_templates_worker_tsconfig_include"
+    ],
+    "2": [
+      "turnstile_spin_templates_worker_src_errors",
+      "turnstile_spin_templates_worker_src_errors_errorresponse",
+      "turnstile_spin_templates_worker_src_errors_siteverifyerror",
+      "turnstile_spin_templates_worker_src_index",
+      "turnstile_spin_templates_worker_src_index_corsheaders",
+      "turnstile_spin_templates_worker_src_index_fetch",
+      "turnstile_spin_templates_worker_src_index_handlehealth",
+      "turnstile_spin_templates_worker_src_index_handlesiteverify",
+      "turnstile_spin_templates_worker_src_index_jsonresponse",
+      "turnstile_spin_templates_worker_src_index_parsebody",
+      "turnstile_spin_templates_worker_src_observability_logsiteverify",
+      "turnstile_spin_templates_worker_src_types_siteverifyrequest",
+      "turnstile_spin_templates_worker_src_types_siteverifyresponse",
+      "turnstile_spin_templates_worker_src_validate",
+      "turnstile_spin_templates_worker_src_validate_fetchwithtimeout",
+      "turnstile_spin_templates_worker_src_validate_retry_on_statuses",
+      "turnstile_spin_templates_worker_src_validate_validate",
+      "turnstile_spin_templates_worker_src_validate_validateresult"
+    ],
+    "3": [
+      "turnstile_spin_templates_worker_src_errors_siteverifyerror_constructor",
+      "turnstile_spin_templates_worker_src_index_worker_version",
+      "turnstile_spin_templates_worker_src_observability",
+      "turnstile_spin_templates_worker_src_observability_logcontext",
+      "turnstile_spin_templates_worker_src_types",
+      "turnstile_spin_templates_worker_src_types_env",
+      "turnstile_spin_templates_worker_src_types_errorcode",
+      "turnstile_spin_templates_worker_src_types_siteverifylogentry",
+      "turnstile_spin_templates_worker_src_types_workermetadata",
+      "turnstile_spin_templates_worker_test_integration_test",
+      "turnstile_spin_templates_worker_test_integration_test_envwith",
+      "turnstile_spin_templates_worker_test_unit_test",
+      "turnstile_spin_templates_worker_test_unit_test_mockfetchonce",
+      "turnstile_spin_templates_worker_test_unit_test_test_env",
+      "turnstile_spin_templates_worker_test_validation_test",
+      "turnstile_spin_templates_worker_test_validation_test_env"
+    ],
+    "4": [
+      "turnstile_spin_templates_worker_package_scripts",
+      "turnstile_spin_templates_worker_package_scripts_deploy",
+      "turnstile_spin_templates_worker_package_scripts_dev",
+      "turnstile_spin_templates_worker_package_scripts_lint",
+      "turnstile_spin_templates_worker_package_scripts_test",
+      "turnstile_spin_templates_worker_package_scripts_test_deploy",
+      "turnstile_spin_templates_worker_package_scripts_test_integration",
+      "turnstile_spin_templates_worker_package_scripts_test_validation",
+      "turnstile_spin_templates_worker_package_scripts_test_watch",
+      "turnstile_spin_templates_worker_package_scripts_typecheck"
+    ],
+    "5": [
+      "shadcn_svelte_agents_openai",
+      "shadcn_svelte_agents_openai_interface",
+      "shadcn_svelte_agents_openai_interface_display_name",
+      "shadcn_svelte_agents_openai_interface_icon_large",
+      "shadcn_svelte_agents_openai_interface_icon_small",
+      "shadcn_svelte_agents_openai_interface_short_description"
+    ],
+    "6": [
+      "turnstile_spin_scripts_worker_deploy",
+      "turnstile_spin_scripts_worker_deploy_deploy",
+      "turnstile_spin_scripts_worker_deploy_set_secret",
+      "turnstile_spin_scripts_worker_deploy_sh__entry"
+    ],
+    "7": [
+      "turnstile_spin_templates_worker_package_repository",
+      "turnstile_spin_templates_worker_package_repository_directory",
+      "turnstile_spin_templates_worker_package_repository_type",
+      "turnstile_spin_templates_worker_package_repository_url"
+    ],
+    "8": [
+      "turnstile_spin_scripts_auth_probe",
+      "turnstile_spin_scripts_auth_probe_emit",
+      "turnstile_spin_scripts_auth_probe_sh__entry"
+    ],
+    "9": [
+      "turnstile_spin_scripts_fetch_secret",
+      "turnstile_spin_scripts_fetch_secret_sh__entry"
+    ],
+    "10": [
+      "turnstile_spin_scripts_persist_skill",
+      "turnstile_spin_scripts_persist_skill_sh__entry"
+    ],
+    "11": [
+      "turnstile_spin_scripts_validate",
+      "turnstile_spin_scripts_validate_sh__entry"
+    ],
+    "12": [
+      "turnstile_spin_scripts_widget_create",
+      "turnstile_spin_scripts_widget_create_sh__entry"
+    ]
+  },
+  "cohesion": {
+    "0": 0.10276679841897234,
+    "1": 0.09090909090909091,
+    "2": 0.2549019607843137,
+    "3": 0.175,
+    "4": 0.2,
+    "5": 0.3333333333333333,
+    "6": 0.8333333333333334,
+    "7": 0.5,
+    "8": 1.0,
+    "9": 1.0,
+    "10": 1.0,
+    "11": 1.0,
+    "12": 1.0
+  },
+  "gods": [
+    {
+      "id": "turnstile_spin_templates_worker_tsconfig_compileroptions",
+      "label": "compilerOptions",
+      "degree": 19
+    },
+    {
+      "id": "turnstile_spin_templates_worker_package_scripts",
+      "label": "scripts",
+      "degree": 10
+    },
+    {
+      "id": "turnstile_spin_templates_worker_src_index_handlesiteverify",
+      "label": "handleSiteverify()",
+      "degree": 7
+    },
+    {
+      "id": "ref_vitest",
+      "label": "vitest",
+      "degree": 7
+    },
+    {
+      "id": "turnstile_spin_templates_worker_src_errors_siteverifyerror",
+      "label": "SiteverifyError",
+      "degree": 6
+    },
+    {
+      "id": "turnstile_spin_templates_worker_src_types_env",
+      "label": "Env",
+      "degree": 6
+    },
+    {
+      "id": "turnstile_spin_templates_worker_src_types_errorcode",
+      "label": "ErrorCode",
+      "degree": 5
+    },
+    {
+      "id": "turnstile_spin_templates_worker_src_index_fetch",
+      "label": "fetch()",
+      "degree": 5
+    },
+    {
+      "id": "turnstile_spin_templates_worker_src_index_jsonresponse",
+      "label": "jsonResponse()",
+      "degree": 5
+    },
+    {
+      "id": "turnstile_spin_templates_worker_src_validate_validate",
+      "label": "validate()",
+      "degree": 5
+    }
+  ],
+  "surprises": [
+    {
+      "source": "LogContext",
+      "target": "ErrorCode",
+      "source_files": [
+        "turnstile-spin/templates/worker/src/observability.ts",
+        "turnstile-spin/templates/worker/src/types.ts"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "why": "peripheral node `LogContext` unexpectedly reaches hub `ErrorCode`"
+    },
+    {
+      "source": "parseBody()",
+      "target": "SiteverifyError",
+      "source_files": [
+        "turnstile-spin/templates/worker/src/index.ts",
+        "turnstile-spin/templates/worker/src/errors.ts"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "cross-file semantic connection"
+    },
+    {
+      "source": "validate()",
+      "target": "SiteverifyError",
+      "source_files": [
+        "turnstile-spin/templates/worker/src/validate.ts",
+        "turnstile-spin/templates/worker/src/errors.ts"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "cross-file semantic connection"
+    },
+    {
+      "source": "ValidateResult",
+      "target": "SiteverifyResponse",
+      "source_files": [
+        "turnstile-spin/templates/worker/src/validate.ts",
+        "turnstile-spin/templates/worker/src/types.ts"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "why": "cross-file semantic connection"
+    },
+    {
+      "source": "handleSiteverify()",
+      "target": "errorResponse()",
+      "source_files": [
+        "turnstile-spin/templates/worker/src/index.ts",
+        "turnstile-spin/templates/worker/src/errors.ts"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "cross-file semantic connection"
+    }
+  ],
+  "questions": [
+    {
+      "type": "bridge_node",
+      "question": "Why does `vitest` connect `Community 0` to `Community 3`?",
+      "why": "High betweenness centrality (0.221) - this node is a cross-community bridge."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 0` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.10276679841897234 - nodes in this community are weakly interconnected."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `scripts` connect `Community 4` to `Community 0`?",
+      "why": "High betweenness centrality (0.092) - this node is a cross-community bridge."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 1` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.09090909090909091 - nodes in this community are weakly interconnected."
+    }
+  ]
+}

@@ -1,0 +1,123 @@
+{
+  "skills/shadcn-svelte/agents/openai.yml": {
+    "mtime": 1794441898.5591342,
+    "seen": 1794441917.7042522,
+    "ast_hash": "76bddd2ef825450c80a0091c87836aae",
+    "semantic_hash": "76bddd2ef825450c80a0091c87836aae"
+  },
+  "skills/shadcn-svelte/evals/evals.json": {
+    "mtime": 1794441898.5592859,
+    "seen": 1794441917.7043447,
+    "ast_hash": "0c7623085f9da20d418c5659abae3eb2",
+    "semantic_hash": "0c7623085f9da20d418c5659abae3eb2",
+    "ast_empty": true
+  },
+  "skills/turnstile-spin/scripts/auth-probe.sh": {
+    "mtime": 1794441898.560313,
+    "seen": 1794441917.7043483,
+    "ast_hash": "2a384fa739117242c56ffddeb313baaf",
+    "semantic_hash": "2a384fa739117242c56ffddeb313baaf"
+  },
+  "skills/turnstile-spin/scripts/fetch-secret.sh": {
+    "mtime": 1794441898.5605845,
+    "seen": 1794441917.7044165,
+    "ast_hash": "08c28ae92bbf3638f291b626f56cf513",
+    "semantic_hash": "08c28ae92bbf3638f291b626f56cf513"
+  },
+  "skills/turnstile-spin/scripts/persist-skill.sh": {
+    "mtime": 1794441898.5605845,
+    "seen": 1794441917.7044764,
+    "ast_hash": "a371fa986b7b4af79aa981640e904da1",
+    "semantic_hash": "a371fa986b7b4af79aa981640e904da1"
+  },
+  "skills/turnstile-spin/scripts/validate.sh": {
+    "mtime": 1794441898.5605845,
+    "seen": 1794441917.7045326,
+    "ast_hash": "48848b2a8691e2abe4c8a4d461db6070",
+    "semantic_hash": "48848b2a8691e2abe4c8a4d461db6070"
+  },
+  "skills/turnstile-spin/scripts/widget-create.sh": {
+    "mtime": 1794441898.5605845,
+    "seen": 1794441917.7045887,
+    "ast_hash": "03099e30cd2ef533b6d0f3788a292e64",
+    "semantic_hash": "03099e30cd2ef533b6d0f3788a292e64"
+  },
+  "skills/turnstile-spin/scripts/worker-deploy.sh": {
+    "mtime": 1794441898.5605845,
+    "seen": 1794441917.7046523,
+    "ast_hash": "256d189429f8a3c92390b0ebc1b25d58",
+    "semantic_hash": "256d189429f8a3c92390b0ebc1b25d58"
+  },
+  "skills/turnstile-spin/templates/worker/package.json": {
+    "mtime": 1794441898.5608742,
+    "seen": 1794441917.7047656,
+    "ast_hash": "946129ae54e6790d3f7fb1b4c2ad5884",
+    "semantic_hash": "946129ae54e6790d3f7fb1b4c2ad5884"
+  },
+  "skills/turnstile-spin/templates/worker/src/errors.ts": {
+    "mtime": 1794441898.5608742,
+    "seen": 1794441917.7048302,
+    "ast_hash": "53c21a07881af502e35116b874f1ef9b",
+    "semantic_hash": "53c21a07881af502e35116b874f1ef9b"
+  },
+  "skills/turnstile-spin/templates/worker/src/index.ts": {
+    "mtime": 1794441898.5611835,
+    "seen": 1794441917.704897,
+    "ast_hash": "fb0dcbc495c34b464a64ef88e8f69fb9",
+    "semantic_hash": "fb0dcbc495c34b464a64ef88e8f69fb9"
+  },
+  "skills/turnstile-spin/templates/worker/src/observability.ts": {
+    "mtime": 1794441898.5611835,
+    "seen": 1794441917.7049627,
+    "ast_hash": "ac82f1e18a691ba723cc571ec9e5e954",
+    "semantic_hash": "ac82f1e18a691ba723cc571ec9e5e954"
+  },
+  "skills/turnstile-spin/templates/worker/src/types.ts": {
+    "mtime": 1794441898.5611835,
+    "seen": 1794441917.7050276,
+    "ast_hash": "ce4c1632b2893aca7dcfb1f6c09fbd8c",
+    "semantic_hash": "ce4c1632b2893aca7dcfb1f6c09fbd8c"
+  },
+  "skills/turnstile-spin/templates/worker/src/validate.ts": {
+    "mtime": 1794441898.5611835,
+    "seen": 1794441917.7050912,
+    "ast_hash": "f488f26410fc0ef09b2bfcf280229e27",
+    "semantic_hash": "f488f26410fc0ef09b2bfcf280229e27"
+  },
+  "skills/turnstile-spin/templates/worker/test/deploy.test.ts": {
+    "mtime": 1794441898.5611835,
+    "seen": 1794441917.7051537,
+    "ast_hash": "2c9cee56988baabb9f2f933bbee67dfb",
+    "semantic_hash": "2c9cee56988baabb9f2f933bbee67dfb"
+  },
+  "skills/turnstile-spin/templates/worker/test/integration.test.ts": {
+    "mtime": 1794441898.561412,
+    "seen": 1794441917.7052164,
+    "ast_hash": "42b8165b9b3b7830edc4f8eee09a3591",
+    "semantic_hash": "42b8165b9b3b7830edc4f8eee09a3591"
+  },
+  "skills/turnstile-spin/templates/worker/test/unit.test.ts": {
+    "mtime": 1794441898.561412,
+    "seen": 1794441917.7052796,
+    "ast_hash": "de68cbfe4bcb223fbed34c1400a78ffd",
+    "semantic_hash": "de68cbfe4bcb223fbed34c1400a78ffd"
+  },
+  "skills/turnstile-spin/templates/worker/test/validation.test.ts": {
+    "mtime": 1794441898.561412,
+    "seen": 1794441917.7053463,
+    "ast_hash": "7d41589e46e5f37356cf5bc6ccdd647d",
+    "semantic_hash": "7d41589e46e5f37356cf5bc6ccdd647d"
+  },
+  "skills/turnstile-spin/templates/worker/tsconfig.json": {
+    "mtime": 1794441898.561412,
+    "seen": 1794441917.7054117,
+    "ast_hash": "1a3d0d44b0db85c3b5ca0a09b4538f6d",
+    "semantic_hash": "1a3d0d44b0db85c3b5ca0a09b4538f6d"
+  },
+  "skills/turnstile-spin/templates/worker/vitest.config.ts": {
+    "mtime": 1794441898.561412,
+    "seen": 1794441917.7054713,
+    "ast_hash": "f77e7eea05480568667754880b4b6a30",
+    "semantic_hash": "f77e7eea05480568667754880b4b6a30"
+  }
+}
