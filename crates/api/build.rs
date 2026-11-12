@@ -1,10 +1,9 @@
-fn main() {
-    if std::env::var("PROTOC").is_err() {
-        std::env::set_var("PROTOC", "/home/kimi/protoc/bin/protoc");
-    }
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // protoc is located via the PROTOC env var or PATH (see README: Build & test).
+    println!("cargo:rerun-if-changed=../../proto/gnomon.proto");
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_protos(&["../../proto/gnomon.proto"], &["../../proto"])
-        .expect("proto compile");
+        .compile_protos(&["../../proto/gnomon.proto"], &["../../proto"])?;
+    Ok(())
 }
