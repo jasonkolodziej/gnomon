@@ -95,11 +95,9 @@ fn bench_parallel(fsm: &Fsm, policy: Arc<dyn Policy>, workers: usize) -> (u64, D
         // Phase 2 (serial applier): commit; the FSM's graph layer
         // revalidates every reservation at commit time. Conflicts are
         // simply not committed (job stays Pending).
-        let mut applied_events = 0u64;
         for plan in &plans {
             let Some(ev) = plan.decision.to_event(plan.job) else { continue };
             fsm.apply(ev);
-            applied_events += 1;
         }
 
         // Phase 3: drain pass — re-evaluate conflicted/unplaced jobs
@@ -121,7 +119,7 @@ fn bench_parallel(fsm: &Fsm, policy: Arc<dyn Policy>, workers: usize) -> (u64, D
                     }
                 }
             }
-            for ev in evs { fsm.apply(ev); applied_events += 1; }
+            for ev in evs { fsm.apply(ev); }
             if !progress { break; }
         }
         let committed = fsm.snapshot().state().jobs.values()

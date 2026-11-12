@@ -262,6 +262,7 @@ impl PlanApplier {
     /// Optimistic commit. Returns `Ok(Some(event))` on commit, `Ok(None)` for
     /// a deferral, `Err(())` on conflict (caller re-enqueues the job).
     /// `committed` counts only plans the state machine actually accepted.
+    #[allow(clippy::result_unit_err)]
     pub fn apply(&self, fsm: &Fsm, plan: &Plan) -> Result<Option<Event>, ()> {
         let Some(ev) = plan.decision.to_event(plan.job) else { return Ok(None) };
         if self.mode == ConflictMode::GlobalIndex && fsm.index() != plan.base_index {

@@ -144,6 +144,7 @@ impl Fsm {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn place(st: &mut State, job: JobId, vertices: &[VertexId], start: u64, dur: Option<u64>,
          expect: &[(VertexId, u64)], now: u64, reserve_only: bool) -> bool {
     let (req, d) = match st.jobs.get(&job) {

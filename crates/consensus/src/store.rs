@@ -140,7 +140,7 @@ impl RaftStorage<C> for Store {
             if let Some(m) = entry.get_membership() {
                 self.membership = StoredMembership::new(Some(entry.log_id), m.clone());
             }
-            if let Some(ev) = event_of(&entry) {
+            if let Some(ev) = event_of(entry) {
                 let idx = self.fsm.apply(ev.clone());
                 out.push(Response { index: idx });
             } else {

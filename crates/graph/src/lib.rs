@@ -567,7 +567,7 @@ impl SubgraphGrant {
             let v = self.local.vertex(id);
             if v.kind != VertexKind::Node { continue; }
             if let Some(start) = v.earliest_fit(req, from, dur) {
-                if best.as_ref().map_or(true, |(_, s)| start < *s) {
+                if best.as_ref().is_none_or(|(_, s)| start < *s) {
                     best = Some((vec![id], start));
                 }
             }

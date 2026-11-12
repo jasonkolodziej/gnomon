@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
             tokio::spawn(async move {
                 // Run the job like slurmd: job environment, walltime enforced
                 // (SIGKILL at the limit, reported as exit 124 like timeout(1)).
-                let req = a.request.clone().unwrap_or_default();
+                let req = a.request.unwrap_or_default();
                 let code = tokio::task::spawn_blocking(move || {
                     let child = std::process::Command::new("sh").arg("-c").arg(&a.command)
                         .env("GNOMON_JOB_ID", a.job_id.to_string())
@@ -81,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
                             Ok(None) => {}
                             Err(_) => return -1,
                         }
-                        if limit.map_or(false, |l| std::time::Instant::now() >= l) {
+                        if limit.is_some_and(|l| std::time::Instant::now() >= l) {
                             let _ = child.kill();
                             let _ = child.wait();
                             return 124;

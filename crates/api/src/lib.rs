@@ -7,7 +7,7 @@
 //! N"), giving clients linearizable-ish reads without polling.
 
 use gnomon_core::{Event, Job, JobId, JobState, Resources, Walltime};
-use gnomon_fsm::{Fsm, Snapshot};
+use gnomon_fsm::Fsm;
 use gnomon_sched::EvalBroker;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,7 +37,7 @@ fn state_name(s: JobState) -> String {
     }.into()
 }
 
-fn job_info(snap: &Snapshot, j: &Job) -> JobInfo {
+fn job_info(j: &Job) -> JobInfo {
     JobInfo {
         id: j.id.0,
         name: j.name.clone(),
@@ -92,7 +92,7 @@ impl Scheduler for SchedulerSvc {
             if snap.index > r.wait_index {
                 let job = snap.job(JobId(r.job_id))
                     .ok_or_else(|| Status::not_found("no such job"))?;
-                return Ok(Response::new(GetJobReply { job: Some(job_info(&snap, job)) }));
+                return Ok(Response::new(GetJobReply { job: Some(job_info(job)) }));
             }
             if std::time::Instant::now() > deadline {
                 return Err(Status::deadline_exceeded("state index not reached"));
@@ -109,7 +109,7 @@ impl Scheduler for SchedulerSvc {
         let jobs = snap.state().jobs.values()
             .filter(|j| r.user.is_empty() || j.user == r.user)
             .filter(|j| r.state.is_empty() || state_name(j.state) == r.state)
-            .map(|j| job_info(&snap, j))
+            .map(job_info)
             .collect();
         Ok(Response::new(ListJobsReply { jobs, state_index: snap.index }))
     }
