@@ -23,16 +23,40 @@ fn setup(nodes: u32, jobs: u64) -> (Arc<Fsm>, Arc<EvalBroker>) {
     let fsm = Arc::new(Fsm::new());
     let broker = Arc::new(EvalBroker::new());
     for n in 0..nodes {
-        fsm.apply(Event::NodeRegistered { name: format!("node{n:04}"),
-            capacity: Resources { cores: 32, mem_mb: 131072, gpus: 4 } });
+        fsm.apply(Event::NodeRegistered {
+            name: format!("node{n:04}"),
+            capacity: Resources {
+                cores: 32,
+                mem_mb: 131072,
+                gpus: 4,
+            },
+        });
     }
     for i in 0..jobs {
         let req = match i % 4 {
-            0 => Resources { cores: 16, mem_mb: 32768, gpus: 2 },
-            1 => Resources { cores: 8, mem_mb: 16384, gpus: 1 },
-            _ => Resources { cores: 4, mem_mb: 8192, gpus: 0 },
+            0 => Resources {
+                cores: 16,
+                mem_mb: 32768,
+                gpus: 2,
+            },
+            1 => Resources {
+                cores: 8,
+                mem_mb: 16384,
+                gpus: 1,
+            },
+            _ => Resources {
+                cores: 4,
+                mem_mb: 8192,
+                gpus: 0,
+            },
         };
-        let mut job = Job::new(JobId(i + 1), "b", "bench", req, Walltime(Duration::from_secs(300)));
+        let mut job = Job::new(
+            JobId(i + 1),
+            "b",
+            "bench",
+            req,
+            Walltime(Duration::from_secs(300)),
+        );
         job.priority = 10_000_000 - i;
         fsm.apply(Event::JobSubmitted(job.clone()));
         broker.enqueue(&job, fsm.index());
@@ -58,7 +82,10 @@ fn run(mode: ConflictMode, nodes: u32, jobs: u64, workers: usize, hb_per_sec: u6
                 let gap = Duration::from_nanos(1_000_000_000 / hb_per_sec);
                 let mut k = 0u32;
                 while !stop.load(Ordering::Relaxed) {
-                    fsm.apply(Event::Heartbeat { name: format!("node{:04}", k % nodes), allocated: Resources::default() });
+                    fsm.apply(Event::Heartbeat {
+                        name: format!("node{:04}", k % nodes),
+                        allocated: Resources::default(),
+                    });
                     k += 1;
                     std::thread::sleep(gap);
                 }
@@ -66,15 +93,26 @@ fn run(mode: ConflictMode, nodes: u32, jobs: u64, workers: usize, hb_per_sec: u6
         }
         let mut hs = Vec::new();
         for _ in 0..workers {
-            let (fsm, broker, policy, applier, evals, in_flight) =
-                (fsm.clone(), broker.clone(), policy.clone(), applier.clone(), evals.clone(), in_flight.clone());
+            let (fsm, broker, policy, applier, evals, in_flight) = (
+                fsm.clone(),
+                broker.clone(),
+                policy.clone(),
+                applier.clone(),
+                evals.clone(),
+                in_flight.clone(),
+            );
             hs.push(s.spawn(move || {
                 let mut idle = 0;
                 while Instant::now() < deadline {
                     in_flight.fetch_add(1, Ordering::SeqCst);
                     let Some(eval) = broker.dequeue() else {
                         in_flight.fetch_sub(1, Ordering::SeqCst);
-                        if in_flight.load(Ordering::SeqCst) == 0 { idle += 1; if idle > 3 { break; } }
+                        if in_flight.load(Ordering::SeqCst) == 0 {
+                            idle += 1;
+                            if idle > 3 {
+                                break;
+                            }
+                        }
                         std::thread::sleep(Duration::from_micros(200));
                         continue;
                     };
@@ -93,14 +131,24 @@ fn run(mode: ConflictMode, nodes: u32, jobs: u64, workers: usize, hb_per_sec: u6
                 }
             }));
         }
-        for h in hs { h.join().unwrap(); }
+        for h in hs {
+            h.join().unwrap();
+        }
         stop.store(true, Ordering::Relaxed);
     });
     let ms = t0.elapsed().as_millis().max(1);
-    let placed = fsm.read(|st| st.jobs.values().filter(|j| j.state != JobState::Pending).count());
-    format!("{mode:?},{nodes},{jobs},{workers},{hb_per_sec},{placed},{},{},{ms},{:.0}",
-        evals.load(Ordering::Relaxed), applier.conflicts.load(Ordering::Relaxed),
-        placed as f64 * 1000.0 / ms as f64)
+    let placed = fsm.read(|st| {
+        st.jobs
+            .values()
+            .filter(|j| j.state != JobState::Pending)
+            .count()
+    });
+    format!(
+        "{mode:?},{nodes},{jobs},{workers},{hb_per_sec},{placed},{},{},{ms},{:.0}",
+        evals.load(Ordering::Relaxed),
+        applier.conflicts.load(Ordering::Relaxed),
+        placed as f64 * 1000.0 / ms as f64
+    )
 }
 
 fn main() {

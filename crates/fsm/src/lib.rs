@@ -12,7 +12,9 @@
 //! journaled, so the state is a deterministic function of (initial state,
 //! event log): the basis for exact replay (`gnomon-sim`).
 
-use gnomon_core::{Assignment, Clock, Event, Job, JobId, JobState, NodeInfo, Resources, StateIndex, SystemClock};
+use gnomon_core::{
+    Assignment, Clock, Event, Job, JobId, JobState, NodeInfo, Resources, StateIndex, SystemClock,
+};
 use gnomon_graph::{ResourceGraph, VertexId, VertexKind};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -48,12 +50,24 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    pub fn state(&self) -> &State { &self.inner }
-    pub fn job(&self, id: JobId) -> Option<&Job> { self.inner.jobs.get(&id) }
-    pub fn pending_jobs(&self) -> impl Iterator<Item = &Job> { self.inner.pending_jobs() }
-    pub fn graph(&self) -> &ResourceGraph { &self.inner.graph }
-    pub fn node(&self, name: &str) -> Option<&NodeInfo> { self.inner.nodes.get(name) }
-    pub fn nodes(&self) -> impl Iterator<Item = &NodeInfo> { self.inner.nodes.values() }
+    pub fn state(&self) -> &State {
+        &self.inner
+    }
+    pub fn job(&self, id: JobId) -> Option<&Job> {
+        self.inner.jobs.get(&id)
+    }
+    pub fn pending_jobs(&self) -> impl Iterator<Item = &Job> {
+        self.inner.pending_jobs()
+    }
+    pub fn graph(&self) -> &ResourceGraph {
+        &self.inner.graph
+    }
+    pub fn node(&self, name: &str) -> Option<&NodeInfo> {
+        self.inner.nodes.get(name)
+    }
+    pub fn nodes(&self) -> impl Iterator<Item = &NodeInfo> {
+        self.inner.nodes.values()
+    }
 }
 
 /// One journaled event with the clock reading it was applied at — enough to
@@ -82,31 +96,52 @@ pub struct Fsm {
 }
 
 impl Default for Fsm {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Fsm {
-    pub fn new() -> Self { Self::with_clock(Arc::new(SystemClock)) }
+    pub fn new() -> Self {
+        Self::with_clock(Arc::new(SystemClock))
+    }
 
     pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
-        Fsm { state: RwLock::new(State::default()), index: AtomicU64::new(0), clock, journal: None }
+        Fsm {
+            state: RwLock::new(State::default()),
+            index: AtomicU64::new(0),
+            clock,
+            journal: None,
+        }
     }
 
     /// Like [`Fsm::with_clock`], but records every applied event in order.
     pub fn recording(clock: Arc<dyn Clock>) -> Self {
-        Fsm { journal: Some(Mutex::new(Vec::new())), ..Self::with_clock(clock) }
+        Fsm {
+            journal: Some(Mutex::new(Vec::new())),
+            ..Self::with_clock(clock)
+        }
     }
 
-    pub fn now(&self) -> u64 { self.clock.now() }
-    pub fn clock(&self) -> &Arc<dyn Clock> { &self.clock }
+    pub fn now(&self) -> u64 {
+        self.clock.now()
+    }
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
 
     /// The journal so far (empty unless created with [`Fsm::recording`]).
     pub fn journal(&self) -> Vec<JournalEntry> {
-        self.journal.as_ref().map(|j| j.lock().unwrap().clone()).unwrap_or_default()
+        self.journal
+            .as_ref()
+            .map(|j| j.lock().unwrap().clone())
+            .unwrap_or_default()
     }
 
     /// Current Raft-style index.
-    pub fn index(&self) -> StateIndex { self.index.load(Ordering::Acquire) }
+    pub fn index(&self) -> StateIndex {
+        self.index.load(Ordering::Acquire)
+    }
 
     /// Immutable snapshot; the read path for API handlers and workers.
     pub fn snapshot(&self) -> Snapshot {
@@ -124,16 +159,25 @@ impl Fsm {
     }
 
     /// Apply one event in log order. Returns the new index.
-    pub fn apply(&self, ev: Event) -> StateIndex { self.apply_with_expect(ev, &[]).index }
+    pub fn apply(&self, ev: Event) -> StateIndex {
+        self.apply_with_expect(ev, &[]).index
+    }
 
-    pub fn apply_checked(&self, ev: Event) -> Applied { self.apply_with_expect(ev, &[]) }
+    pub fn apply_checked(&self, ev: Event) -> Applied {
+        self.apply_with_expect(ev, &[])
+    }
 
     /// Apply with the plan's per-vertex read set (leader-side fast path; the
     /// journaled event is identical, followers simply revalidate).
     pub fn apply_with_expect(&self, ev: Event, expect: &[(VertexId, u64)]) -> Applied {
         let now = self.now();
         let mut st = self.state.write().unwrap();
-        if let Some(j) = &self.journal { j.lock().unwrap().push(JournalEntry { at: now, event: ev.clone() }); }
+        if let Some(j) = &self.journal {
+            j.lock().unwrap().push(JournalEntry {
+                at: now,
+                event: ev.clone(),
+            });
+        }
         let accepted = apply_event(&mut st, &ev, expect, now);
         let index = self.index.fetch_add(1, Ordering::AcqRel) + 1;
         Applied { index, accepted }
@@ -145,18 +189,35 @@ impl Fsm {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn place(st: &mut State, job: JobId, vertices: &[VertexId], start: u64, dur: Option<u64>,
-         expect: &[(VertexId, u64)], now: u64, reserve_only: bool) -> bool {
+fn place(
+    st: &mut State,
+    job: JobId,
+    vertices: &[VertexId],
+    start: u64,
+    dur: Option<u64>,
+    expect: &[(VertexId, u64)],
+    now: u64,
+    reserve_only: bool,
+) -> bool {
     let (req, d) = match st.jobs.get(&job) {
-        Some(j) if j.state == JobState::Pending => (j.request, dur.unwrap_or(j.walltime.0.as_secs())),
+        Some(j) if j.state == JobState::Pending => {
+            (j.request, dur.unwrap_or(j.walltime.0.as_secs()))
+        }
         _ => return false, // already placed / cancelled / unknown: reject
     };
-    if !st.graph.commit_job(vertices, &req, start, d, Some(job.0), expect) {
+    if !st
+        .graph
+        .commit_job(vertices, &req, start, d, Some(job.0), expect)
+    {
         return false;
     }
     let running = !reserve_only && start <= now;
     let j = st.jobs.get_mut(&job).unwrap();
-    j.state = if running { JobState::Running } else { JobState::Reserved };
+    j.state = if running {
+        JobState::Running
+    } else {
+        JobState::Reserved
+    };
     j.planned_start = Some(start);
     j.planned_dur = Some(d);
     if running {
@@ -165,7 +226,11 @@ fn place(st: &mut State, job: JobId, vertices: &[VertexId], start: u64, dur: Opt
         for &v in vertices {
             if let Some(vx) = st.graph.vertices.get(v as usize) {
                 let node = vx.name.clone();
-                st.assignments.entry(node).or_default().push(Assignment { job, command: cmd.clone(), start });
+                st.assignments.entry(node).or_default().push(Assignment {
+                    job,
+                    command: cmd.clone(),
+                    start,
+                });
             }
         }
     }
@@ -188,27 +253,47 @@ fn apply_event(st: &mut State, ev: &Event, expect: &[(VertexId, u64)], now: u64)
                 }
             }
         }
-        Event::JobStarted { job, vertices, start, dur } => {
+        Event::JobStarted {
+            job,
+            vertices,
+            start,
+            dur,
+        } => {
             return place(st, *job, vertices, *start, *dur, expect, now, false);
         }
-        Event::JobReserved { job, vertices, start, dur } => {
+        Event::JobReserved {
+            job,
+            vertices,
+            start,
+            dur,
+        } => {
             return place(st, *job, vertices, *start, *dur, expect, now, true);
         }
         Event::JobFinished { job, end, code } => {
             if let Some(j) = st.jobs.get_mut(job) {
-                j.state = if *code == 0 { JobState::Completed } else { JobState::Failed };
+                j.state = if *code == 0 {
+                    JobState::Completed
+                } else {
+                    JobState::Failed
+                };
             }
             st.graph.release_job(job.0, *end);
         }
         Event::JobExtended { job, new_end } => {
             st.graph.extend_job(job.0, *new_end);
             if let Some(j) = st.jobs.get_mut(job) {
-                if let Some(s) = j.planned_start { j.planned_dur = Some(new_end.saturating_sub(s)); }
+                if let Some(s) = j.planned_start {
+                    j.planned_dur = Some(new_end.saturating_sub(s));
+                }
             }
         }
         Event::ReservationsCleared { .. } => {
-            let reserved: Vec<JobId> = st.jobs.values()
-                .filter(|j| j.state == JobState::Reserved).map(|j| j.id).collect();
+            let reserved: Vec<JobId> = st
+                .jobs
+                .values()
+                .filter(|j| j.state == JobState::Reserved)
+                .map(|j| j.id)
+                .collect();
             for id in reserved {
                 st.graph.release_job(id.0, 0);
                 let j = st.jobs.get_mut(&id).unwrap();
@@ -220,7 +305,8 @@ fn apply_event(st: &mut State, ev: &Event, expect: &[(VertexId, u64)], now: u64)
         Event::NodeRegistered { name, capacity } => {
             if st.graph.by_name(name).is_none() {
                 let root = ensure_cluster_root(&mut st.graph);
-                st.graph.add_vertex(VertexKind::Node, name, *capacity, Some(root));
+                st.graph
+                    .add_vertex(VertexKind::Node, name, *capacity, Some(root));
             }
             let info = st.nodes.entry(name.clone()).or_default();
             info.name = name.clone();
@@ -233,12 +319,10 @@ fn apply_event(st: &mut State, ev: &Event, expect: &[(VertexId, u64)], now: u64)
                 q.drain(..n);
             }
         }
-        Event::NodeProfileSet { name, profile } => {
-            match st.graph.by_name(name) {
-                Some(id) => st.graph.set_profile(id, profile.clone()),
-                None => return false,
-            }
-        }
+        Event::NodeProfileSet { name, profile } => match st.graph.by_name(name) {
+            Some(id) => st.graph.set_profile(id, profile.clone()),
+            None => return false,
+        },
         Event::Heartbeat { name, allocated } => {
             if let Some(info) = st.nodes.get_mut(name) {
                 info.last_heartbeat = now;
@@ -250,9 +334,8 @@ fn apply_event(st: &mut State, ev: &Event, expect: &[(VertexId, u64)], now: u64)
 }
 
 fn ensure_cluster_root(g: &mut ResourceGraph) -> VertexId {
-    g.by_name("cluster").unwrap_or_else(|| {
-        g.add_vertex(VertexKind::Cluster, "cluster", Resources::default(), None)
-    })
+    g.by_name("cluster")
+        .unwrap_or_else(|| g.add_vertex(VertexKind::Cluster, "cluster", Resources::default(), None))
 }
 
 #[cfg(test)]
@@ -264,34 +347,75 @@ mod tests {
     fn setup() -> (Arc<ManualClock>, Fsm) {
         let clock = Arc::new(ManualClock::new(1000));
         let fsm = Fsm::recording(clock.clone());
-        fsm.apply(Event::NodeRegistered { name: "n0".into(),
-            capacity: Resources { cores: 4, mem_mb: 0, gpus: 0 } });
+        fsm.apply(Event::NodeRegistered {
+            name: "n0".into(),
+            capacity: Resources {
+                cores: 4,
+                mem_mb: 0,
+                gpus: 0,
+            },
+        });
         (clock, fsm)
     }
 
     fn job(id: u64, cores: u32, wall: u64) -> Job {
-        Job::new(JobId(id), "j", "u", Resources { cores, mem_mb: 0, gpus: 0 },
-                 Walltime(Duration::from_secs(wall)))
+        Job::new(
+            JobId(id),
+            "j",
+            "u",
+            Resources {
+                cores,
+                mem_mb: 0,
+                gpus: 0,
+            },
+            Walltime(Duration::from_secs(wall)),
+        )
     }
 
     #[test]
     fn double_start_of_same_job_is_rejected() {
         let (_c, fsm) = setup();
         fsm.apply(Event::JobSubmitted(job(1, 1, 100)));
-        let ev = Event::JobStarted { job: JobId(1), vertices: vec![1], start: 1000, dur: None };
+        let ev = Event::JobStarted {
+            job: JobId(1),
+            vertices: vec![1],
+            start: 1000,
+            dur: None,
+        };
         assert!(fsm.apply_checked(ev.clone()).accepted);
-        assert!(!fsm.apply_checked(ev).accepted, "a job must never be placed twice");
+        assert!(
+            !fsm.apply_checked(ev).accepted,
+            "a job must never be placed twice"
+        );
     }
 
     #[test]
     fn early_finish_frees_the_rest_of_the_window() {
         let (clock, fsm) = setup();
         fsm.apply(Event::JobSubmitted(job(1, 4, 1000)));
-        fsm.apply(Event::JobStarted { job: JobId(1), vertices: vec![1], start: 1000, dur: None });
+        fsm.apply(Event::JobStarted {
+            job: JobId(1),
+            vertices: vec![1],
+            start: 1000,
+            dur: None,
+        });
         clock.set(1100);
-        fsm.apply(Event::JobFinished { job: JobId(1), end: 1100, code: 0 });
-        let fit = fsm.read(|s| s.graph.vertex(1).earliest_fit(
-            &Resources { cores: 4, mem_mb: 0, gpus: 0 }, 1100, 50));
+        fsm.apply(Event::JobFinished {
+            job: JobId(1),
+            end: 1100,
+            code: 0,
+        });
+        let fit = fsm.read(|s| {
+            s.graph.vertex(1).earliest_fit(
+                &Resources {
+                    cores: 4,
+                    mem_mb: 0,
+                    gpus: 0,
+                },
+                1100,
+                50,
+            )
+        });
         assert_eq!(fit, Some(1100));
     }
 
@@ -300,10 +424,24 @@ mod tests {
         let (clock, fsm) = setup();
         fsm.apply(Event::JobSubmitted(job(1, 2, 100)));
         fsm.apply(Event::JobSubmitted(job(2, 4, 100)));
-        fsm.apply(Event::JobStarted { job: JobId(1), vertices: vec![1], start: 1000, dur: Some(50) });
-        fsm.apply(Event::JobReserved { job: JobId(2), vertices: vec![1], start: 1050, dur: None });
+        fsm.apply(Event::JobStarted {
+            job: JobId(1),
+            vertices: vec![1],
+            start: 1000,
+            dur: Some(50),
+        });
+        fsm.apply(Event::JobReserved {
+            job: JobId(2),
+            vertices: vec![1],
+            start: 1050,
+            dur: None,
+        });
         clock.set(1040);
-        fsm.apply(Event::JobFinished { job: JobId(1), end: 1040, code: 0 });
+        fsm.apply(Event::JobFinished {
+            job: JobId(1),
+            end: 1040,
+            code: 0,
+        });
         fsm.apply(Event::ReservationsCleared { now: 1040 });
 
         // Replay the journal into a fresh FSM driven by the same clock values.

@@ -1,7 +1,7 @@
 //! openraft type bindings: the replicated log carries scheduler Events.
 
-use openraft::EntryPayload;
 use gnomon_core::Event;
+use openraft::EntryPayload;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 

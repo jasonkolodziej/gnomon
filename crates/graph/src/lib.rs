@@ -49,21 +49,39 @@ pub struct CapView<'a> {
 }
 
 impl<'a> CapView<'a> {
-    pub fn fixed(base: Resources) -> Self { CapView { base, profile: None } }
+    pub fn fixed(base: Resources) -> Self {
+        CapView {
+            base,
+            profile: None,
+        }
+    }
     fn at(&self, t: u64) -> Resources {
-        match self.profile { Some(p) => p.at(&self.base, t), None => self.base }
+        match self.profile {
+            Some(p) => p.at(&self.base, t),
+            None => self.base,
+        }
     }
     /// Largest capacity the profile can ever offer (feasibility bound).
     fn max(&self) -> Resources {
         match self.profile {
             None => self.base,
             Some(p) => p.steps.iter().fold(
-                if p.period.is_some() { Resources::default() } else { self.base },
-                |m, s| Resources { cores: m.cores.max(s.1.cores), mem_mb: m.mem_mb.max(s.1.mem_mb),
-                                   gpus: m.gpus.max(s.1.gpus) }),
+                if p.period.is_some() {
+                    Resources::default()
+                } else {
+                    self.base
+                },
+                |m, s| Resources {
+                    cores: m.cores.max(s.1.cores),
+                    mem_mb: m.mem_mb.max(s.1.mem_mb),
+                    gpus: m.gpus.max(s.1.gpus),
+                },
+            ),
         }
     }
-    fn period(&self) -> u64 { self.profile.and_then(|p| p.period).unwrap_or(0) }
+    fn period(&self) -> u64 {
+        self.profile.and_then(|p| p.period).unwrap_or(0)
+    }
 }
 
 /// Per-vertex temporal planner.
@@ -77,7 +95,9 @@ pub struct Planner {
     spans: Vec<Span>,
 }
 
-fn sub(a: Resources, b: Resources) -> Resources { a.saturating_sub(&b) }
+fn sub(a: Resources, b: Resources) -> Resources {
+    a.saturating_sub(&b)
+}
 
 impl Planner {
     /// Earliest `start >= from` such that `req` fits against `cap`
@@ -91,7 +111,9 @@ impl Planner {
         let mut deltas: Vec<(u64, bool, Resources)> = Vec::with_capacity(self.spans.len() * 2);
         let mut last_end = from;
         for s in &self.spans {
-            if s.end <= from { continue; }
+            if s.end <= from {
+                continue;
+            }
             last_end = last_end.max(s.end);
             if s.start <= from {
                 usage = usage.add(&s.res);
@@ -104,7 +126,9 @@ impl Planner {
         // usage is zero and the profile has repeated at least once.
         let horizon = last_end + cap.period() + dur + 1;
         let mut points: Vec<u64> = deltas.iter().map(|d| d.0).collect();
-        if let Some(p) = cap.profile { p.breakpoints(from, horizon, &mut points); }
+        if let Some(p) = cap.profile {
+            p.breakpoints(from, horizon, &mut points);
+        }
         points.push(from);
         points.sort_unstable();
         points.dedup();
@@ -115,25 +139,36 @@ impl Planner {
         for (i, &p) in points.iter().enumerate() {
             while di < deltas.len() && deltas[di].0 <= p {
                 let (_, is_start, r) = deltas[di];
-                usage = if is_start { usage.add(&r) } else { sub(usage, r) };
+                usage = if is_start {
+                    usage.add(&r)
+                } else {
+                    sub(usage, r)
+                };
                 di += 1;
             }
             let ok = usage.add(req).fits_in(&cap.at(p));
-            if !ok { run_start = None; continue; }
+            if !ok {
+                run_start = None;
+                continue;
+            }
             let rs = *run_start.get_or_insert(p);
             // For periodic profiles every start in [last_end, last_end+period]
             // is fully checked before the horizon; beyond it nothing new can
             // fit, so the tail segment is finite.
             let tail = if cap.period() > 0 { horizon } else { u64::MAX };
             let seg_end = points.get(i + 1).copied().unwrap_or(tail);
-            if seg_end.saturating_sub(rs) >= dur { return Some(rs); }
+            if seg_end.saturating_sub(rs) >= dur {
+                return Some(rs);
+            }
         }
         None
     }
 
     /// Resources in use at instant `t`.
     pub fn usage_at(&self, t: u64) -> Resources {
-        self.spans.iter().filter(|s| s.start <= t && t < s.end)
+        self.spans
+            .iter()
+            .filter(|s| s.start <= t && t < s.end)
             .fold(Resources::default(), |u, s| u.add(&s.res))
     }
 
@@ -143,11 +178,23 @@ impl Planner {
         self.reserve_job(cap, req, start, dur, None)
     }
 
-    pub fn reserve_job(&mut self, cap: CapView, req: &Resources, start: u64, dur: u64, job: Option<u64>) -> bool {
+    pub fn reserve_job(
+        &mut self,
+        cap: CapView,
+        req: &Resources,
+        start: u64,
+        dur: u64,
+        job: Option<u64>,
+    ) -> bool {
         if self.earliest_fit(cap, req, start, dur) != Some(start) {
             return false;
         }
-        self.spans.push(Span { start, end: start + dur, res: *req, job });
+        self.spans.push(Span {
+            start,
+            end: start + dur,
+            res: *req,
+            job,
+        });
         true
     }
 
@@ -155,7 +202,12 @@ impl Planner {
     /// planner state (version fast path) or for physical facts (a running job
     /// that overran its prediction is on the hardware whether it fits or not).
     fn push_unchecked(&mut self, req: &Resources, start: u64, dur: u64, job: Option<u64>) {
-        self.spans.push(Span { start, end: start + dur, res: *req, job });
+        self.spans.push(Span {
+            start,
+            end: start + dur,
+            res: *req,
+            job,
+        });
     }
 
     /// Truncate the job's spans at `at` (early completion / cancellation).
@@ -163,7 +215,10 @@ impl Planner {
         let before = self.spans.len();
         let mut changed = false;
         for s in self.spans.iter_mut().filter(|s| s.job == Some(job)) {
-            if s.end > at { s.end = at.max(s.start); changed = true; }
+            if s.end > at {
+                s.end = at.max(s.start);
+                changed = true;
+            }
         }
         self.spans.retain(|s| s.end > s.start);
         changed || self.spans.len() != before
@@ -173,7 +228,10 @@ impl Planner {
     pub fn extend_job(&mut self, job: u64, new_end: u64) -> bool {
         let mut changed = false;
         for s in self.spans.iter_mut().filter(|s| s.job == Some(job)) {
-            if s.end < new_end { s.end = new_end; changed = true; }
+            if s.end < new_end {
+                s.end = new_end;
+                changed = true;
+            }
         }
         changed
     }
@@ -182,16 +240,28 @@ impl Planner {
     pub fn drop_future(&mut self, now: u64) -> Vec<u64> {
         let mut jobs = Vec::new();
         self.spans.retain(|s| {
-            if s.start > now { if let Some(j) = s.job { jobs.push(j); } false } else { true }
+            if s.start > now {
+                if let Some(j) = s.job {
+                    jobs.push(j);
+                }
+                false
+            } else {
+                true
+            }
         });
         jobs
     }
 
     pub fn job_span(&self, job: u64) -> Option<(u64, u64)> {
-        self.spans.iter().find(|s| s.job == Some(job)).map(|s| (s.start, s.end))
+        self.spans
+            .iter()
+            .find(|s| s.job == Some(job))
+            .map(|s| (s.start, s.end))
     }
 
-    pub fn span_count(&self) -> usize { self.spans.len() }
+    pub fn span_count(&self) -> usize {
+        self.spans.len()
+    }
 
     pub fn release_before(&mut self, now: u64) {
         self.spans.retain(|s| s.end > now);
@@ -218,7 +288,10 @@ pub struct Vertex {
 
 impl Vertex {
     pub fn cap(&self) -> CapView<'_> {
-        CapView { base: self.capacity, profile: self.profile.as_ref() }
+        CapView {
+            base: self.capacity,
+            profile: self.profile.as_ref(),
+        }
     }
     pub fn earliest_fit(&self, req: &Resources, from: u64, dur: u64) -> Option<u64> {
         self.planner.earliest_fit(self.cap(), req, from, dur)
@@ -234,7 +307,13 @@ pub struct ResourceGraph {
 }
 
 impl ResourceGraph {
-    pub fn add_vertex(&mut self, kind: VertexKind, name: &str, capacity: Resources, parent: Option<VertexId>) -> VertexId {
+    pub fn add_vertex(
+        &mut self,
+        kind: VertexKind,
+        name: &str,
+        capacity: Resources,
+        parent: Option<VertexId>,
+    ) -> VertexId {
         let id = self.vertices.len() as VertexId;
         self.vertices.push(Vertex {
             kind,
@@ -254,9 +333,15 @@ impl ResourceGraph {
         id
     }
 
-    pub fn vertex(&self, id: VertexId) -> &Vertex { &self.vertices[id as usize] }
-    pub fn vertex_mut(&mut self, id: VertexId) -> &mut Vertex { &mut self.vertices[id as usize] }
-    pub fn by_name(&self, name: &str) -> Option<VertexId> { self.by_name.get(name).copied() }
+    pub fn vertex(&self, id: VertexId) -> &Vertex {
+        &self.vertices[id as usize]
+    }
+    pub fn vertex_mut(&mut self, id: VertexId) -> &mut Vertex {
+        &mut self.vertices[id as usize]
+    }
+    pub fn by_name(&self, name: &str) -> Option<VertexId> {
+        self.by_name.get(name).copied()
+    }
 
     pub fn set_profile(&mut self, id: VertexId, profile: Option<CapacityProfile>) {
         let v = self.vertex_mut(id);
@@ -267,7 +352,9 @@ impl ResourceGraph {
     /// Schedulable leaves: nodes (and later GPU vertices). Matching walks
     /// leaves and checks both capacity *and* the temporal planner.
     pub fn leaves(&self) -> impl Iterator<Item = VertexId> + '_ {
-        self.vertices.iter().enumerate()
+        self.vertices
+            .iter()
+            .enumerate()
             .filter(|(_, v)| v.kind == VertexKind::Node || v.kind == VertexKind::Gpu)
             .map(|(i, _)| i as VertexId)
     }
@@ -278,13 +365,26 @@ impl ResourceGraph {
     /// workers (or successive jobs) spread across nodes instead of
     /// collapsing onto the first empty leaf — Borg's "relaxed
     /// randomization" in miniature.
-    pub fn match_request(&self, req: &Resources, from: u64, dur: u64, seed: u64) -> Option<(Vec<VertexId>, u64)> {
-        if req.is_zero() { return None; }
-        let leaves: Vec<VertexId> = self.leaves()
-            .filter(|&id| self.vertex(id).kind == VertexKind::Node
-                    && !self.vertex(id).name.starts_with("granted:"))
+    pub fn match_request(
+        &self,
+        req: &Resources,
+        from: u64,
+        dur: u64,
+        seed: u64,
+    ) -> Option<(Vec<VertexId>, u64)> {
+        if req.is_zero() {
+            return None;
+        }
+        let leaves: Vec<VertexId> = self
+            .leaves()
+            .filter(|&id| {
+                self.vertex(id).kind == VertexKind::Node
+                    && !self.vertex(id).name.starts_with("granted:")
+            })
             .collect();
-        if leaves.is_empty() { return None; }
+        if leaves.is_empty() {
+            return None;
+        }
         let n = leaves.len();
         let off = (seed as usize) % n;
         let mut best: Option<(Vec<VertexId>, u64)> = None;
@@ -298,7 +398,9 @@ impl ResourceGraph {
                 if better {
                     let done = start == from;
                     best = Some((vec![id], start));
-                    if done { break; } // cannot do better than `from`
+                    if done {
+                        break;
+                    } // cannot do better than `from`
                 }
             }
         }
@@ -307,7 +409,10 @@ impl ResourceGraph {
 
     /// Versions of the given vertices (a plan's read set).
     pub fn versions(&self, vertices: &[VertexId]) -> Vec<(VertexId, u64)> {
-        vertices.iter().map(|&v| (v, self.vertex(v).version)).collect()
+        vertices
+            .iter()
+            .map(|&v| (v, self.vertex(v).version))
+            .collect()
     }
 
     /// Commit-time revalidation + reservation (report section 5.2: the
@@ -322,9 +427,17 @@ impl ResourceGraph {
     /// this exact planner state and is valid by construction: insert without
     /// re-checking (fast path). Otherwise revalidate capacity (slow path) —
     /// the plan is rejected only if it no longer fits. All-or-nothing.
-    pub fn commit_job(&mut self, vertices: &[VertexId], req: &Resources, start: u64, dur: u64,
-                      job: Option<u64>, expect: &[(VertexId, u64)]) -> bool {
-        let fast = !expect.is_empty() && expect.len() == vertices.len()
+    pub fn commit_job(
+        &mut self,
+        vertices: &[VertexId],
+        req: &Resources,
+        start: u64,
+        dur: u64,
+        job: Option<u64>,
+        expect: &[(VertexId, u64)],
+    ) -> bool {
+        let fast = !expect.is_empty()
+            && expect.len() == vertices.len()
             && expect.iter().all(|&(v, ver)| self.vertex(v).version == ver);
         if !fast {
             for &id in vertices {
@@ -343,7 +456,9 @@ impl ResourceGraph {
 
     fn for_each_leaf_mut(&mut self, mut f: impl FnMut(&mut Vertex) -> bool) {
         for v in self.vertices.iter_mut() {
-            if f(v) { v.version += 1; }
+            if f(v) {
+                v.version += 1;
+            }
         }
     }
 
@@ -385,8 +500,16 @@ mod tests {
         let mut g = ResourceGraph::default();
         let root = g.add_vertex(VertexKind::Cluster, "cluster", Resources::default(), None);
         for n in 0..2 {
-            g.add_vertex(VertexKind::Node, &format!("n{n}"),
-                Resources { cores: 8, mem_mb: 1024, gpus: 0 }, Some(root));
+            g.add_vertex(
+                VertexKind::Node,
+                &format!("n{n}"),
+                Resources {
+                    cores: 8,
+                    mem_mb: 1024,
+                    gpus: 0,
+                },
+                Some(root),
+            );
         }
         g
     }
@@ -394,11 +517,18 @@ mod tests {
     #[test]
     fn earliest_fit_respects_reservations() {
         let mut g = two_node_graph();
-        let req = Resources { cores: 8, mem_mb: 0, gpus: 0 };
+        let req = Resources {
+            cores: 8,
+            mem_mb: 0,
+            gpus: 0,
+        };
         // Fill n0 for [100, 200).
         let n0 = g.by_name("n0").unwrap();
         let cap = g.vertex(n0).capacity;
-        assert!(g.vertex_mut(n0).planner.reserve(CapView::fixed(cap), &req, 100, 100));
+        assert!(g
+            .vertex_mut(n0)
+            .planner
+            .reserve(CapView::fixed(cap), &req, 100, 100));
         // Request [50, 150) overlaps n0's reservation; must land on n1 at t=50.
         let (verts, start) = g.match_request(&req, 50, 100, 0).unwrap();
         assert_eq!(start, 50);
@@ -408,12 +538,19 @@ mod tests {
     #[test]
     fn backfill_finds_future_window() {
         let mut g = two_node_graph();
-        let full = Resources { cores: 8, mem_mb: 0, gpus: 0 };
+        let full = Resources {
+            cores: 8,
+            mem_mb: 0,
+            gpus: 0,
+        };
         // Occupy both nodes [0, 50).
         for n in ["n0", "n1"] {
             let id = g.by_name(n).unwrap();
             let cap = g.vertex(id).capacity;
-            assert!(g.vertex_mut(id).planner.reserve(CapView::fixed(cap), &full, 0, 50));
+            assert!(g
+                .vertex_mut(id)
+                .planner
+                .reserve(CapView::fixed(cap), &full, 0, 50));
         }
         // Request must backfill to t=50.
         let (_, start) = g.match_request(&full, 0, 100, 0).unwrap();
@@ -423,7 +560,11 @@ mod tests {
     #[test]
     fn commit_revalidation_rejects_conflicts() {
         let mut g = two_node_graph();
-        let full = Resources { cores: 8, mem_mb: 0, gpus: 0 };
+        let full = Resources {
+            cores: 8,
+            mem_mb: 0,
+            gpus: 0,
+        };
         let n0 = g.by_name("n0").unwrap();
         assert!(g.commit(&[n0], &full, 0, 100));
         // Second conflicting commit at same window must fail.
@@ -437,15 +578,34 @@ mod tests {
 mod planner_tests {
     use super::*;
 
-    fn r(c: u32) -> Resources { Resources { cores: c, mem_mb: 0, gpus: 0 } }
+    fn r(c: u32) -> Resources {
+        Resources {
+            cores: c,
+            mem_mb: 0,
+            gpus: 0,
+        }
+    }
 
     /// Brute-force oracle on an integer grid: earliest start in [from, limit)
     /// where every unit second of the run fits.
-    fn oracle(spans: &[(u64, u64, u32)], cap: &dyn Fn(u64) -> u32, req: u32, from: u64, dur: u64, limit: u64) -> Option<u64> {
+    fn oracle(
+        spans: &[(u64, u64, u32)],
+        cap: &dyn Fn(u64) -> u32,
+        req: u32,
+        from: u64,
+        dur: u64,
+        limit: u64,
+    ) -> Option<u64> {
         'outer: for t in from..limit {
             for x in t..t + dur {
-                let used: u32 = spans.iter().filter(|s| s.0 <= x && x < s.1).map(|s| s.2).sum();
-                if used + req > cap(x) { continue 'outer; }
+                let used: u32 = spans
+                    .iter()
+                    .filter(|s| s.0 <= x && x < s.1)
+                    .map(|s| s.2)
+                    .sum();
+                if used + req > cap(x) {
+                    continue 'outer;
+                }
             }
             return Some(t);
         }
@@ -456,28 +616,62 @@ mod planner_tests {
     fn sweep_matches_bruteforce_oracle() {
         // Deterministic pseudo-random cases (splitmix64).
         let mut x: u64 = 0x9E3779B97F4A7C15;
-        let mut next = || { x = x.wrapping_add(0x9E3779B97F4A7C15); let mut z = x;
+        let mut next = || {
+            x = x.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = x;
             z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB); z ^ (z >> 31) };
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^ (z >> 31)
+        };
         for case in 0..400 {
             let mut p = Planner::default();
             let mut spans = vec![];
             for _ in 0..(next() % 8) {
-                let s = next() % 40; let d = 1 + next() % 15; let c = 1 + (next() % 4) as u32;
-                p.spans.push(Span { start: s, end: s + d, res: r(c), job: None });
+                let s = next() % 40;
+                let d = 1 + next() % 15;
+                let c = 1 + (next() % 4) as u32;
+                p.spans.push(Span {
+                    start: s,
+                    end: s + d,
+                    res: r(c),
+                    job: None,
+                });
                 spans.push((s, s + d, c));
             }
             let base = 6u32;
             let periodic = case % 2 == 0;
-            let prof = CapacityProfile { period: Some(20), steps: vec![(0, r(base)), (12, r(3))] };
-            let capv = if periodic { CapView { base: r(base), profile: Some(&prof) } } else { CapView::fixed(r(base)) };
-            let capf = |t: u64| if periodic { if t % 20 >= 12 { 3 } else { base } } else { base };
+            let prof = CapacityProfile {
+                period: Some(20),
+                steps: vec![(0, r(base)), (12, r(3))],
+            };
+            let capv = if periodic {
+                CapView {
+                    base: r(base),
+                    profile: Some(&prof),
+                }
+            } else {
+                CapView::fixed(r(base))
+            };
+            let capf = |t: u64| {
+                if periodic {
+                    if t % 20 >= 12 {
+                        3
+                    } else {
+                        base
+                    }
+                } else {
+                    base
+                }
+            };
             let req = 1 + (next() % 4) as u32;
             let from = next() % 30;
             let dur = 1 + next() % (if periodic { 8 } else { 20 });
             let got = p.earliest_fit(capv, &r(req), from, dur);
             let want = oracle(&spans, &capf, req, from, dur, 200);
-            assert_eq!(got, want, "case {case}: spans={spans:?} req={req} from={from} dur={dur} periodic={periodic}");
+            assert_eq!(
+                got, want,
+                "case {case}: spans={spans:?} req={req} from={from} dur={dur} periodic={periodic}"
+            );
         }
     }
 
@@ -510,8 +704,8 @@ mod planner_tests {
         // An unrelated commit on b must not invalidate a plan that read a.
         assert!(g.commit_job(&[b], &r(4), 0, 10, Some(9), &[]));
         assert!(g.commit_job(&[a], &r(2), 0, 10, Some(1), &read_a)); // fast path
-        // A second plan that read a's *old* version still commits if it fits
-        // (slow path revalidation)...
+                                                                     // A second plan that read a's *old* version still commits if it fits
+                                                                     // (slow path revalidation)...
         assert!(g.commit_job(&[a], &r(2), 0, 10, Some(2), &read_a));
         // ...and is rejected only when it truly no longer fits.
         assert!(!g.commit_job(&[a], &r(1), 0, 10, Some(3), &read_a));
@@ -522,7 +716,14 @@ mod planner_tests {
         let mut g = ResourceGraph::default();
         let n = g.add_vertex(VertexKind::Node, "n", r(8), None);
         // Daily cap: 8 cores, but only 2 between 16:00 and 20:00.
-        g.set_profile(n, Some(CapacityProfile::daily(vec![(0, r(8)), (16 * 3600, r(2)), (20 * 3600, r(8))])));
+        g.set_profile(
+            n,
+            Some(CapacityProfile::daily(vec![
+                (0, r(8)),
+                (16 * 3600, r(2)),
+                (20 * 3600, r(8)),
+            ])),
+        );
         // A 4-core 2h job asked for at 15:00 cannot run through the cap window;
         // earliest is 20:00.
         let t15 = 15 * 3600;
@@ -553,19 +754,29 @@ pub struct SubgraphGrant {
 }
 
 impl SubgraphGrant {
-    pub fn vertices(&self) -> &[VertexId] { &self.vertices }
+    pub fn vertices(&self) -> &[VertexId] {
+        &self.vertices
+    }
 
     /// Child-side scheduling: match within the grant only.
-    pub fn match_within(&self, req: &Resources, from: u64, dur: u64, seed: u64)
-        -> Option<(Vec<VertexId>, u64)>
-    {
+    pub fn match_within(
+        &self,
+        req: &Resources,
+        from: u64,
+        dur: u64,
+        seed: u64,
+    ) -> Option<(Vec<VertexId>, u64)> {
         let mut best: Option<(Vec<VertexId>, u64)> = None;
         let n = self.vertices.len();
-        if n == 0 { return None; }
+        if n == 0 {
+            return None;
+        }
         for k in 0..n {
             let id = self.vertices[(seed as usize + k) % n];
             let v = self.local.vertex(id);
-            if v.kind != VertexKind::Node { continue; }
+            if v.kind != VertexKind::Node {
+                continue;
+            }
             if let Some(start) = v.earliest_fit(req, from, dur) {
                 if best.as_ref().is_none_or(|(_, s)| start < *s) {
                     best = Some((vec![id], start));
@@ -592,7 +803,10 @@ impl ResourceGraph {
                 self.vertex_mut(v).name = new;
             }
         }
-        SubgraphGrant { vertices: vertices.to_vec(), local: self.clone() }
+        SubgraphGrant {
+            vertices: vertices.to_vec(),
+            local: self.clone(),
+        }
     }
 
     /// Parent-side leaves exclude granted vertices (name marker).
@@ -626,13 +840,25 @@ mod delegation_tests {
         let root = g.add_vertex(VertexKind::Cluster, "cluster", Resources::default(), None);
         let mut ids = vec![];
         for n in 0..4 {
-            ids.push(g.add_vertex(VertexKind::Node, &format!("n{n}"),
-                Resources { cores: 8, mem_mb: 0, gpus: 0 }, Some(root)));
+            ids.push(g.add_vertex(
+                VertexKind::Node,
+                &format!("n{n}"),
+                Resources {
+                    cores: 8,
+                    mem_mb: 0,
+                    gpus: 0,
+                },
+                Some(root),
+            ));
         }
         // Grant n0,n1 to a child instance.
         let grant = g.grant_subgraph(&ids[0..2]);
         // Parent matching now only sees n2,n3.
-        let req = Resources { cores: 8, mem_mb: 0, gpus: 0 };
+        let req = Resources {
+            cores: 8,
+            mem_mb: 0,
+            gpus: 0,
+        };
         let (verts, _) = g.match_request(&req, 0, 100, 0).unwrap();
         assert!(verts.iter().all(|v| !ids[0..2].contains(v)));
         // Child matches within its grant.

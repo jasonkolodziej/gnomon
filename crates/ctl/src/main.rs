@@ -24,7 +24,11 @@ fn demo() {
     for n in 0..4 {
         fsm.apply(Event::NodeRegistered {
             name: format!("node{n:03}"),
-            capacity: Resources { cores: 16, mem_mb: 65536, gpus: 4 },
+            capacity: Resources {
+                cores: 16,
+                mem_mb: 65536,
+                gpus: 4,
+            },
         });
     }
 
@@ -32,12 +36,25 @@ fn demo() {
     for i in 0..64u64 {
         let id = fsm.next_job_id();
         let req = if i % 3 == 0 {
-            Resources { cores: 8, mem_mb: 16384, gpus: 2 }
+            Resources {
+                cores: 8,
+                mem_mb: 16384,
+                gpus: 2,
+            }
         } else {
-            Resources { cores: 4, mem_mb: 8192, gpus: 0 }
+            Resources {
+                cores: 4,
+                mem_mb: 8192,
+                gpus: 0,
+            }
         };
-        let mut job = Job::new(id, &format!("demo-{i}"), "alice", req,
-                               Walltime(Duration::from_secs(600)));
+        let mut job = Job::new(
+            id,
+            &format!("demo-{i}"),
+            "alice",
+            req,
+            Walltime(Duration::from_secs(600)),
+        );
         job.priority = 1000 - i; // earlier submissions rank higher
         fsm.apply(Event::JobSubmitted(job.clone()));
         broker.enqueue(&job, fsm.index());
@@ -51,7 +68,9 @@ fn demo() {
     // Worker pool: N threads pulling evals, computing plans as pure
     // functions of snapshots, and committing optimistically (one inline
     // re-evaluation on conflict, then re-enqueue for a later pass).
-    let n_workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let n_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     std::thread::scope(|s| {
         for _ in 0..n_workers {
             let (broker, fsm, policy, applier) =
@@ -59,8 +78,12 @@ fn demo() {
             s.spawn(move || {
                 while let Some(eval) = broker.dequeue() {
                     let snap = fsm.snapshot();
-                    let Some(job) = snap.job(eval.job) else { continue };
-                    if job.state != gnomon_core::JobState::Pending { continue; }
+                    let Some(job) = snap.job(eval.job) else {
+                        continue;
+                    };
+                    if job.state != gnomon_core::JobState::Pending {
+                        continue;
+                    }
                     let plan = policy.schedule(&snap, job);
                     if applier.apply(&fsm, &plan).is_err() {
                         // Optimistic conflict: re-evaluate once against fresh state.
@@ -90,11 +113,19 @@ fn demo() {
     println!("gnomon-ctl demo run");
     println!("  fsm index:        {}", fsm.index());
     println!("  running/reserved/pending: {running}/{reserved}/{pending}");
-    println!("  plans committed:  {}", applier.committed.load(Ordering::Relaxed));
-    println!("  evals coalesced:  {}", broker.coalesced.load(Ordering::Relaxed));
-    println!("  plan conflicts:   {}", applier.conflicts.load(Ordering::Relaxed));
+    println!(
+        "  plans committed:  {}",
+        applier.committed.load(Ordering::Relaxed)
+    );
+    println!(
+        "  evals coalesced:  {}",
+        broker.coalesced.load(Ordering::Relaxed)
+    );
+    println!(
+        "  plan conflicts:   {}",
+        applier.conflicts.load(Ordering::Relaxed)
+    );
 }
-
 
 /// Server mode: gRPC API + background scheduler loop (phases 3-4).
 #[tokio::main]

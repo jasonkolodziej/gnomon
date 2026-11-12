@@ -52,9 +52,17 @@ pub struct Plan {
 pub enum Decision {
     /// Start immediately on these graph vertices. `dur` = planned span
     /// (`None` = full walltime).
-    Start { vertices: Vec<u32>, start: u64, dur: Option<u64> },
+    Start {
+        vertices: Vec<u32>,
+        start: u64,
+        dur: Option<u64>,
+    },
     /// Backfill reservation in the future.
-    Reserve { vertices: Vec<u32>, start: u64, dur: Option<u64> },
+    Reserve {
+        vertices: Vec<u32>,
+        start: u64,
+        dur: Option<u64>,
+    },
     /// Cannot place even in the future window — leave pending.
     Defer,
 }
@@ -64,23 +72,63 @@ impl Decision {
     /// differs by construction between estimators).
     pub fn same_placement(&self, other: &Decision) -> bool {
         match (self, other) {
-            (Decision::Start { vertices: a, start: s, .. }, Decision::Start { vertices: b, start: t, .. })
-            | (Decision::Reserve { vertices: a, start: s, .. }, Decision::Reserve { vertices: b, start: t, .. }) => a == b && s == t,
+            (
+                Decision::Start {
+                    vertices: a,
+                    start: s,
+                    ..
+                },
+                Decision::Start {
+                    vertices: b,
+                    start: t,
+                    ..
+                },
+            )
+            | (
+                Decision::Reserve {
+                    vertices: a,
+                    start: s,
+                    ..
+                },
+                Decision::Reserve {
+                    vertices: b,
+                    start: t,
+                    ..
+                },
+            ) => a == b && s == t,
             (Decision::Defer, Decision::Defer) => true,
             _ => false,
         }
     }
 
     pub fn vertices(&self) -> &[u32] {
-        match self { Decision::Start { vertices, .. } | Decision::Reserve { vertices, .. } => vertices,
-                     Decision::Defer => &[] }
+        match self {
+            Decision::Start { vertices, .. } | Decision::Reserve { vertices, .. } => vertices,
+            Decision::Defer => &[],
+        }
     }
     pub fn to_event(&self, job: JobId) -> Option<Event> {
         match self {
-            Decision::Start { vertices, start, dur } =>
-                Some(Event::JobStarted { job, vertices: vertices.clone(), start: *start, dur: *dur }),
-            Decision::Reserve { vertices, start, dur } =>
-                Some(Event::JobReserved { job, vertices: vertices.clone(), start: *start, dur: *dur }),
+            Decision::Start {
+                vertices,
+                start,
+                dur,
+            } => Some(Event::JobStarted {
+                job,
+                vertices: vertices.clone(),
+                start: *start,
+                dur: *dur,
+            }),
+            Decision::Reserve {
+                vertices,
+                start,
+                dur,
+            } => Some(Event::JobReserved {
+                job,
+                vertices: vertices.clone(),
+                start: *start,
+                dur: *dur,
+            }),
             Decision::Defer => None,
         }
     }
@@ -104,7 +152,9 @@ struct BrokerInner {
 }
 
 impl EvalBroker {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Enqueue (or coalesce) an evaluation for a job.
     pub fn enqueue(&self, job: &Job, index: StateIndex) {
@@ -120,9 +170,16 @@ impl EvalBroker {
             inner.queue.remove(&old_key);
         }
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        let eval = Eval { job: job.id, priority: job.priority, enqueued_at: index, seq };
+        let eval = Eval {
+            job: job.id,
+            priority: job.priority,
+            enqueued_at: index,
+            seq,
+        };
         inner.by_job.insert(job.id, eval.clone());
-        inner.queue.insert((std::cmp::Reverse(eval.priority), seq), job.id);
+        inner
+            .queue
+            .insert((std::cmp::Reverse(eval.priority), seq), job.id);
     }
 
     pub fn dequeue(&self) -> Option<Eval> {
@@ -130,11 +187,20 @@ impl EvalBroker {
         let key = inner.queue.keys().next().copied()?;
         let id = inner.queue.remove(&key)?;
         inner.by_job.remove(&id);
-        Some(Eval { job: id, priority: key.0 .0, enqueued_at: 0, seq: key.1 })
+        Some(Eval {
+            job: id,
+            priority: key.0 .0,
+            enqueued_at: 0,
+            seq: key.1,
+        })
     }
 
-    pub fn len(&self) -> usize { self.pending.lock().unwrap().queue.len() }
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn len(&self) -> usize {
+        self.pending.lock().unwrap().queue.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Pure scheduling policy: (graph, job, now) in, decision out. Replaceable
@@ -144,22 +210,33 @@ pub trait Policy: Send + Sync {
     /// now?" (reservation-depth limit, like Slurm's `bf_max_job_test`).
     fn place(&self, graph: &ResourceGraph, job: &Job, now: u64, allow_reserve: bool) -> Decision;
 
-    fn name(&self) -> String { "policy".into() }
+    fn name(&self) -> String {
+        "policy".into()
+    }
 
     /// Planned span for a job (walltime unless a runtime model is attached).
-    fn planned_secs(&self, job: &Job) -> u64 { job.walltime.secs() }
+    fn planned_secs(&self, job: &Job) -> u64 {
+        job.walltime.secs()
+    }
 
     /// Called when a job completes, so learning policies can update.
     fn observe(&self, _job: &Job, _actual_secs: u64) {}
 
     /// For a running job that outlived its planned span: new span length.
-    fn extend_secs(&self, job: &Job, elapsed: u64) -> u64 { job.walltime.secs().max(elapsed) }
+    fn extend_secs(&self, job: &Job, elapsed: u64) -> u64 {
+        job.walltime.secs().max(elapsed)
+    }
 
     /// Snapshot-level entry point used by worker threads.
     fn schedule(&self, snap: &Snapshot, job: &Job) -> Plan {
         let decision = self.place(snap.graph(), job, snap.now, true);
         let read_set = snap.graph().versions(decision.vertices());
-        Plan { job: job.id, base_index: snap.index, decision, read_set }
+        Plan {
+            job: job.id,
+            base_index: snap.index,
+            decision,
+            read_set,
+        }
     }
 }
 
@@ -174,14 +251,24 @@ pub struct BackfillPolicy {
 }
 
 impl BackfillPolicy {
-    pub fn new(window_secs: u64) -> Self { BackfillPolicy { window_secs, estimator: None } }
+    pub fn new(window_secs: u64) -> Self {
+        BackfillPolicy {
+            window_secs,
+            estimator: None,
+        }
+    }
     pub fn with_estimator(window_secs: u64, est: Arc<dyn RuntimeEstimator>) -> Self {
-        BackfillPolicy { window_secs, estimator: Some(est) }
+        BackfillPolicy {
+            window_secs,
+            estimator: Some(est),
+        }
     }
 }
 
 impl Default for BackfillPolicy {
-    fn default() -> Self { Self::new(48 * 3600) }
+    fn default() -> Self {
+        Self::new(48 * 3600)
+    }
 }
 
 impl Policy for BackfillPolicy {
@@ -193,38 +280,65 @@ impl Policy for BackfillPolicy {
     }
 
     fn planned_secs(&self, job: &Job) -> u64 {
-        match &self.estimator { Some(e) => e.planned_secs(job), None => job.walltime.secs() }
+        match &self.estimator {
+            Some(e) => e.planned_secs(job),
+            None => job.walltime.secs(),
+        }
     }
 
     fn observe(&self, job: &Job, actual: u64) {
-        if let Some(e) = &self.estimator { e.observe(job, actual); }
+        if let Some(e) = &self.estimator {
+            e.observe(job, actual);
+        }
     }
 
     fn extend_secs(&self, job: &Job, elapsed: u64) -> u64 {
-        match &self.estimator { Some(e) => e.extend_secs(job, elapsed), None => job.walltime.secs().max(elapsed) }
+        match &self.estimator {
+            Some(e) => e.extend_secs(job, elapsed),
+            None => job.walltime.secs().max(elapsed),
+        }
     }
 
     fn place(&self, graph: &ResourceGraph, job: &Job, now: u64, allow_reserve: bool) -> Decision {
         let dur = self.planned_secs(job);
-        let dur_field = if self.estimator.is_some() { Some(dur) } else { None };
+        let dur_field = if self.estimator.is_some() {
+            Some(dur)
+        } else {
+            None
+        };
         if !allow_reserve {
             // Cheap "start now?" check: skip vertices without free capacity now.
             for id in graph.leaves() {
                 let v = graph.vertex(id);
-                if v.name.starts_with("granted:") { continue; }
+                if v.name.starts_with("granted:") {
+                    continue;
+                }
                 let free = v.cap().base; // quick reject on current usage
-                if !v.planner.usage_at(now).add(&job.request).fits_in(&free) && v.profile.is_none() { continue; }
+                if !v.planner.usage_at(now).add(&job.request).fits_in(&free) && v.profile.is_none()
+                {
+                    continue;
+                }
                 if v.earliest_fit(&job.request, now, dur) == Some(now) {
-                    return Decision::Start { vertices: vec![id], start: now, dur: dur_field };
+                    return Decision::Start {
+                        vertices: vec![id],
+                        start: now,
+                        dur: dur_field,
+                    };
                 }
             }
             return Decision::Defer;
         }
         match graph.match_request(&job.request, now, dur, job.id.0) {
-            Some((vertices, start)) if start <= now => Decision::Start { vertices, start, dur: dur_field },
-            Some((vertices, start)) if start <= now + self.window_secs => {
-                Decision::Reserve { vertices, start, dur: dur_field }
-            }
+            Some((vertices, start)) if start <= now => Decision::Start {
+                vertices,
+                start,
+                dur: dur_field,
+            },
+            Some((vertices, start)) if start <= now + self.window_secs => Decision::Reserve {
+                vertices,
+                start,
+                dur: dur_field,
+            },
             _ => Decision::Defer,
         }
     }
@@ -249,14 +363,22 @@ pub struct PlanApplier {
 }
 
 impl Default for PlanApplier {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PlanApplier {
-    pub fn new() -> Self { Self::with_mode(ConflictMode::PerVertex) }
+    pub fn new() -> Self {
+        Self::with_mode(ConflictMode::PerVertex)
+    }
 
     pub fn with_mode(mode: ConflictMode) -> Self {
-        PlanApplier { mode, committed: AtomicU64::new(0), conflicts: AtomicU64::new(0) }
+        PlanApplier {
+            mode,
+            committed: AtomicU64::new(0),
+            conflicts: AtomicU64::new(0),
+        }
     }
 
     /// Optimistic commit. Returns `Ok(Some(event))` on commit, `Ok(None)` for
@@ -264,7 +386,9 @@ impl PlanApplier {
     /// `committed` counts only plans the state machine actually accepted.
     #[allow(clippy::result_unit_err)]
     pub fn apply(&self, fsm: &Fsm, plan: &Plan) -> Result<Option<Event>, ()> {
-        let Some(ev) = plan.decision.to_event(plan.job) else { return Ok(None) };
+        let Some(ev) = plan.decision.to_event(plan.job) else {
+            return Ok(None);
+        };
         if self.mode == ConflictMode::GlobalIndex && fsm.index() != plan.base_index {
             self.conflicts.fetch_add(1, Ordering::Relaxed);
             return Err(());
@@ -294,14 +418,23 @@ pub trait RuntimeEstimator: Send + Sync + std::fmt::Debug {
     fn observe(&self, _job: &Job, _actual_secs: u64) {}
     /// New span length for a job that has run `elapsed` s past its plan.
     fn extend_secs(&self, job: &Job, elapsed: u64) -> u64 {
-        (elapsed.saturating_mul(2)).max(elapsed + 60).min(job.walltime.secs()).max(elapsed + 1)
+        (elapsed.saturating_mul(2))
+            .max(elapsed + 60)
+            .min(job.walltime.secs())
+            .max(elapsed + 1)
     }
 }
 
 impl RuntimeEstimator for QuantileEstimator {
-    fn name(&self) -> String { format!("q{:.2}", self.theta) }
-    fn planned_secs(&self, job: &Job) -> u64 { QuantileEstimator::planned_secs(self, job) }
-    fn observe(&self, job: &Job, a: u64) { QuantileEstimator::observe(self, job, a) }
+    fn name(&self) -> String {
+        format!("q{:.2}", self.theta)
+    }
+    fn planned_secs(&self, job: &Job) -> u64 {
+        QuantileEstimator::planned_secs(self, job)
+    }
+    fn observe(&self, job: &Job, a: u64) {
+        QuantileEstimator::observe(self, job, a)
+    }
 }
 
 /// Learns each user's runtime/walltime ratio from completed jobs and plans
@@ -325,8 +458,14 @@ pub struct QuantileEstimator {
 
 impl QuantileEstimator {
     pub fn new(theta: f64) -> Self {
-        QuantileEstimator { theta, window: 32, min_samples: 4, floor_secs: 60,
-            users: RwLock::new(HashMap::new()), global: RwLock::new(VecDeque::new()) }
+        QuantileEstimator {
+            theta,
+            window: 32,
+            min_samples: 4,
+            floor_secs: 60,
+            users: RwLock::new(HashMap::new()),
+            global: RwLock::new(VecDeque::new()),
+        }
     }
 
     fn quantile(v: &VecDeque<f64>, q: f64) -> f64 {
@@ -339,10 +478,16 @@ impl QuantileEstimator {
     /// Ratio quantile for a user (falls back to the global history, then 1.0).
     pub fn ratio(&self, user: &str) -> f64 {
         if let Some(h) = self.users.read().unwrap().get(user) {
-            if h.len() >= self.min_samples { return Self::quantile(h, self.theta); }
+            if h.len() >= self.min_samples {
+                return Self::quantile(h, self.theta);
+            }
         }
         let g = self.global.read().unwrap();
-        if g.len() >= self.min_samples * 4 { Self::quantile(&g, self.theta) } else { 1.0 }
+        if g.len() >= self.min_samples * 4 {
+            Self::quantile(&g, self.theta)
+        } else {
+            1.0
+        }
     }
 
     pub fn planned_secs(&self, job: &Job) -> u64 {
@@ -354,14 +499,29 @@ impl QuantileEstimator {
     pub fn observe(&self, job: &Job, actual: u64) {
         let wall = job.walltime.secs().max(1);
         let r = (actual as f64 / wall as f64).clamp(0.0, 1.0);
-        let push = |q: &mut VecDeque<f64>, cap: usize| { q.push_back(r); while q.len() > cap { q.pop_front(); } };
-        push(self.users.write().unwrap().entry(job.user.clone()).or_default(), self.window);
+        let push = |q: &mut VecDeque<f64>, cap: usize| {
+            q.push_back(r);
+            while q.len() > cap {
+                q.pop_front();
+            }
+        };
+        push(
+            self.users
+                .write()
+                .unwrap()
+                .entry(job.user.clone())
+                .or_default(),
+            self.window,
+        );
         push(&mut self.global.write().unwrap(), self.window * 16);
     }
 
     /// Overrun: double the elapsed time (at least +60s), capped at walltime.
     pub fn extend_secs(&self, job: &Job, elapsed: u64) -> u64 {
-        (elapsed.saturating_mul(2)).max(elapsed + 60).min(job.walltime.secs()).max(elapsed + 1)
+        (elapsed.saturating_mul(2))
+            .max(elapsed + 60)
+            .min(job.walltime.secs())
+            .max(elapsed + 1)
     }
 }
 
@@ -376,27 +536,45 @@ pub struct PassOptions {
 }
 
 impl Default for PassOptions {
-    fn default() -> Self { PassOptions { max_reservations: 32 } }
+    fn default() -> Self {
+        PassOptions {
+            max_reservations: 32,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PassStats { pub started: u64, pub reserved: u64, pub extended: u64, pub conflicts: u64 }
+pub struct PassStats {
+    pub started: u64,
+    pub reserved: u64,
+    pub extended: u64,
+    pub conflicts: u64,
+}
 
 /// Conservative backfill with compression: extend overrunning predictions,
 /// clear reservations, then place pending jobs in priority order (the first
 /// `max_reservations` that can't start now get reservations). All changes
 /// go through FSM events, so a pass is replayable.
-pub fn backfill_pass(fsm: &Fsm, policy: &dyn Policy, applier: &PlanApplier, opts: PassOptions) -> PassStats {
+pub fn backfill_pass(
+    fsm: &Fsm,
+    policy: &dyn Policy,
+    applier: &PlanApplier,
+    opts: PassOptions,
+) -> PassStats {
     let now = fsm.now();
     let mut stats = PassStats::default();
 
     // 1. Overruns: running jobs past their planned span get extended.
-    let overruns: Vec<(JobId, u64)> = fsm.read(|st| st.jobs.values()
-        .filter(|j| j.state == JobState::Running)
-        .filter_map(|j| {
-            let (s, d) = (j.planned_start?, j.planned_dur?);
-            (s + d <= now).then(|| (j.id, s + policy.extend_secs(j, now - s)))
-        }).collect());
+    let overruns: Vec<(JobId, u64)> = fsm.read(|st| {
+        st.jobs
+            .values()
+            .filter(|j| j.state == JobState::Running)
+            .filter_map(|j| {
+                let (s, d) = (j.planned_start?, j.planned_dur?);
+                (s + d <= now).then(|| (j.id, s + policy.extend_secs(j, now - s)))
+            })
+            .collect()
+    });
     for (job, new_end) in overruns {
         fsm.apply(Event::JobExtended { job, new_end });
         stats.extended += 1;
@@ -404,10 +582,13 @@ pub fn backfill_pass(fsm: &Fsm, policy: &dyn Policy, applier: &PlanApplier, opts
 
     // 2. Re-plan: drop reservations (they are recomputed below).
     let any_reserved = fsm.read(|st| st.jobs.values().any(|j| j.state == JobState::Reserved));
-    if any_reserved { fsm.apply(Event::ReservationsCleared { now }); }
+    if any_reserved {
+        fsm.apply(Event::ReservationsCleared { now });
+    }
 
     // 3. Place pending jobs in priority order.
-    let mut queue: Vec<(u64, JobId)> = fsm.read(|st| st.pending_jobs().map(|j| (j.priority, j.id)).collect());
+    let mut queue: Vec<(u64, JobId)> =
+        fsm.read(|st| st.pending_jobs().map(|j| (j.priority, j.id)).collect());
     queue.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     let mut reservations = 0usize;
     for (_, id) in queue {
@@ -416,12 +597,20 @@ pub fn backfill_pass(fsm: &Fsm, policy: &dyn Policy, applier: &PlanApplier, opts
             let job = st.jobs.get(&id)?;
             let decision = policy.place(&st.graph, job, now, allow);
             let read_set = st.graph.versions(decision.vertices());
-            Some(Plan { job: id, base_index: 0, decision, read_set })
+            Some(Plan {
+                job: id,
+                base_index: 0,
+                decision,
+                read_set,
+            })
         });
         let Some(plan) = plan else { continue };
         match applier.apply(fsm, &plan) {
             Ok(Some(Event::JobStarted { .. })) => stats.started += 1,
-            Ok(Some(_)) => { stats.reserved += 1; reservations += 1; }
+            Ok(Some(_)) => {
+                stats.reserved += 1;
+                reservations += 1;
+            }
             Ok(None) => {}
             Err(()) => stats.conflicts += 1,
         }
@@ -434,7 +623,12 @@ pub fn backfill_pass(fsm: &Fsm, policy: &dyn Policy, applier: &PlanApplier, opts
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ShadowDiff { pub job: JobId, pub now: u64, pub primary: Decision, pub candidate: Decision }
+pub struct ShadowDiff {
+    pub job: JobId,
+    pub now: u64,
+    pub primary: Decision,
+    pub candidate: Decision,
+}
 
 /// Wraps the live policy; every decision is also computed by `candidate`
 /// against the same graph and time, and disagreements are recorded.
@@ -447,7 +641,12 @@ pub struct ShadowPolicy {
 
 impl ShadowPolicy {
     pub fn new(primary: Arc<dyn Policy>, candidate: Arc<dyn Policy>) -> Self {
-        ShadowPolicy { primary, candidate, decisions: AtomicU64::new(0), diffs: Mutex::new(Vec::new()) }
+        ShadowPolicy {
+            primary,
+            candidate,
+            decisions: AtomicU64::new(0),
+            diffs: Mutex::new(Vec::new()),
+        }
     }
     pub fn agreement(&self) -> f64 {
         let n = self.decisions.load(Ordering::Relaxed).max(1) as f64;
@@ -456,16 +655,34 @@ impl ShadowPolicy {
 }
 
 impl Policy for ShadowPolicy {
-    fn name(&self) -> String { format!("shadow({} vs {})", self.primary.name(), self.candidate.name()) }
-    fn planned_secs(&self, job: &Job) -> u64 { self.primary.planned_secs(job) }
-    fn observe(&self, job: &Job, a: u64) { self.primary.observe(job, a); self.candidate.observe(job, a); }
-    fn extend_secs(&self, job: &Job, e: u64) -> u64 { self.primary.extend_secs(job, e) }
+    fn name(&self) -> String {
+        format!(
+            "shadow({} vs {})",
+            self.primary.name(),
+            self.candidate.name()
+        )
+    }
+    fn planned_secs(&self, job: &Job) -> u64 {
+        self.primary.planned_secs(job)
+    }
+    fn observe(&self, job: &Job, a: u64) {
+        self.primary.observe(job, a);
+        self.candidate.observe(job, a);
+    }
+    fn extend_secs(&self, job: &Job, e: u64) -> u64 {
+        self.primary.extend_secs(job, e)
+    }
     fn place(&self, graph: &ResourceGraph, job: &Job, now: u64, allow: bool) -> Decision {
         let p = self.primary.place(graph, job, now, allow);
         let c = self.candidate.place(graph, job, now, allow);
         self.decisions.fetch_add(1, Ordering::Relaxed);
         if !p.same_placement(&c) {
-            self.diffs.lock().unwrap().push(ShadowDiff { job: job.id, now, primary: p.clone(), candidate: c });
+            self.diffs.lock().unwrap().push(ShadowDiff {
+                job: job.id,
+                now,
+                primary: p.clone(),
+                candidate: c,
+            });
         }
         p
     }
@@ -480,8 +697,17 @@ mod tests {
     #[test]
     fn broker_coalesces_duplicate_evals() {
         let broker = EvalBroker::new();
-        let job = Job::new(JobId(1), "a", "u",
-            Resources { cores: 1, mem_mb: 0, gpus: 0 }, Walltime(Duration::from_secs(60)));
+        let job = Job::new(
+            JobId(1),
+            "a",
+            "u",
+            Resources {
+                cores: 1,
+                mem_mb: 0,
+                gpus: 0,
+            },
+            Walltime(Duration::from_secs(60)),
+        );
         broker.enqueue(&job, 5);
         broker.enqueue(&job, 5); // same index -> coalesced
         broker.enqueue(&job, 4); // older index -> coalesced
@@ -494,23 +720,50 @@ mod tests {
         let fsm = Fsm::new();
         fsm.apply(Event::NodeRegistered {
             name: "n0".into(),
-            capacity: Resources { cores: 4, mem_mb: 1024, gpus: 0 },
+            capacity: Resources {
+                cores: 4,
+                mem_mb: 1024,
+                gpus: 0,
+            },
         });
-        let job = Job::new(JobId(1), "a", "u",
-            Resources { cores: 1, mem_mb: 0, gpus: 0 }, Walltime(Duration::from_secs(60)));
+        let job = Job::new(
+            JobId(1),
+            "a",
+            "u",
+            Resources {
+                cores: 1,
+                mem_mb: 0,
+                gpus: 0,
+            },
+            Walltime(Duration::from_secs(60)),
+        );
         fsm.apply(Event::JobSubmitted(job.clone()));
         let snap = fsm.snapshot();
         let plan = Plan {
             job: JobId(1),
             base_index: snap.index,
-            decision: Decision::Start { vertices: vec![1], start: gnomon_core::now_secs(), dur: None },
+            decision: Decision::Start {
+                vertices: vec![1],
+                start: gnomon_core::now_secs(),
+                dur: None,
+            },
             read_set: snap.graph().versions(&[1]),
         };
         for mode in [ConflictMode::GlobalIndex, ConflictMode::PerVertex] {
             let fsm2 = Fsm::new();
-            for ev in [Event::NodeRegistered { name: "n0".into(),
-                           capacity: Resources { cores: 4, mem_mb: 1024, gpus: 0 } },
-                       Event::JobSubmitted(job.clone())] { fsm2.apply(ev); }
+            for ev in [
+                Event::NodeRegistered {
+                    name: "n0".into(),
+                    capacity: Resources {
+                        cores: 4,
+                        mem_mb: 1024,
+                        gpus: 0,
+                    },
+                },
+                Event::JobSubmitted(job.clone()),
+            ] {
+                fsm2.apply(ev);
+            }
             let applier = PlanApplier::with_mode(mode);
             assert!(applier.apply(&fsm2, &plan).is_ok());
             // Same plan again: the job is no longer pending -> conflict in
@@ -525,29 +778,65 @@ mod tests {
     fn heartbeat_does_not_invalidate_plans_in_per_vertex_mode() {
         let mk = || {
             let fsm = Fsm::new();
-            fsm.apply(Event::NodeRegistered { name: "n0".into(),
-                capacity: Resources { cores: 4, mem_mb: 1024, gpus: 0 } });
-            fsm.apply(Event::JobSubmitted(Job::new(JobId(1), "a", "u",
-                Resources { cores: 1, mem_mb: 0, gpus: 0 }, Walltime(Duration::from_secs(60)))));
+            fsm.apply(Event::NodeRegistered {
+                name: "n0".into(),
+                capacity: Resources {
+                    cores: 4,
+                    mem_mb: 1024,
+                    gpus: 0,
+                },
+            });
+            fsm.apply(Event::JobSubmitted(Job::new(
+                JobId(1),
+                "a",
+                "u",
+                Resources {
+                    cores: 1,
+                    mem_mb: 0,
+                    gpus: 0,
+                },
+                Walltime(Duration::from_secs(60)),
+            )));
             fsm
         };
         let policy = BackfillPolicy::default();
-        for (mode, ok) in [(ConflictMode::GlobalIndex, false), (ConflictMode::PerVertex, true)] {
+        for (mode, ok) in [
+            (ConflictMode::GlobalIndex, false),
+            (ConflictMode::PerVertex, true),
+        ] {
             let fsm = mk();
             let snap = fsm.snapshot();
             let plan = policy.schedule(&snap, snap.job(JobId(1)).unwrap());
-            fsm.apply(Event::Heartbeat { name: "n0".into(), allocated: Resources::default() });
-            assert_eq!(PlanApplier::with_mode(mode).apply(&fsm, &plan).is_ok(), ok, "{mode:?}");
+            fsm.apply(Event::Heartbeat {
+                name: "n0".into(),
+                allocated: Resources::default(),
+            });
+            assert_eq!(
+                PlanApplier::with_mode(mode).apply(&fsm, &plan).is_ok(),
+                ok,
+                "{mode:?}"
+            );
         }
     }
 
     #[test]
     fn estimator_learns_user_ratio_and_respects_walltime() {
         let est = QuantileEstimator::new(0.9);
-        let j = Job::new(JobId(1), "a", "alice", Resources { cores: 1, mem_mb: 0, gpus: 0 },
-                         Walltime(Duration::from_secs(10_000)));
+        let j = Job::new(
+            JobId(1),
+            "a",
+            "alice",
+            Resources {
+                cores: 1,
+                mem_mb: 0,
+                gpus: 0,
+            },
+            Walltime(Duration::from_secs(10_000)),
+        );
         assert_eq!(est.planned_secs(&j), 10_000); // no history -> walltime
-        for k in 0..10 { est.observe(&j, 1000 + k * 100); } // ratios 0.10..0.19
+        for k in 0..10 {
+            est.observe(&j, 1000 + k * 100);
+        } // ratios 0.10..0.19
         let p = est.planned_secs(&j);
         assert!((1800..=1900).contains(&p), "p90 of ratios ~0.19 -> {p}");
         assert!(est.extend_secs(&j, 9_000) <= 10_000);
@@ -556,25 +845,60 @@ mod tests {
     #[test]
     fn shadow_records_disagreements_without_acting() {
         let fsm = Fsm::new();
-        fsm.apply(Event::NodeRegistered { name: "n0".into(),
-            capacity: Resources { cores: 4, mem_mb: 0, gpus: 0 } });
+        fsm.apply(Event::NodeRegistered {
+            name: "n0".into(),
+            capacity: Resources {
+                cores: 4,
+                mem_mb: 0,
+                gpus: 0,
+            },
+        });
         let est = Arc::new(QuantileEstimator::new(0.5));
-        let user_job = |id| Job::new(JobId(id), "a", "bob", Resources { cores: 4, mem_mb: 0, gpus: 0 },
-                                     Walltime(Duration::from_secs(1000)));
-        for k in 0..8 { est.observe(&user_job(100 + k), 100); } // bob uses ~10% of walltime
-        let shadow = ShadowPolicy::new(Arc::new(BackfillPolicy::default()),
-                                       Arc::new(BackfillPolicy::with_estimator(48 * 3600, est)));
+        let user_job = |id| {
+            Job::new(
+                JobId(id),
+                "a",
+                "bob",
+                Resources {
+                    cores: 4,
+                    mem_mb: 0,
+                    gpus: 0,
+                },
+                Walltime(Duration::from_secs(1000)),
+            )
+        };
+        for k in 0..8 {
+            est.observe(&user_job(100 + k), 100);
+        } // bob uses ~10% of walltime
+        let shadow = ShadowPolicy::new(
+            Arc::new(BackfillPolicy::default()),
+            Arc::new(BackfillPolicy::with_estimator(48 * 3600, est)),
+        );
         // Node is reserved from now+500: a full-walltime plan cannot fit before
         // it, a 100 s prediction can.
         let now = gnomon_core::now_secs();
         fsm.apply(Event::JobSubmitted(user_job(9)));
-        assert!(fsm.apply_checked(Event::JobReserved { job: JobId(9), vertices: vec![1], start: now + 500, dur: None }).accepted);
+        assert!(
+            fsm.apply_checked(Event::JobReserved {
+                job: JobId(9),
+                vertices: vec![1],
+                start: now + 500,
+                dur: None
+            })
+            .accepted
+        );
         fsm.apply(Event::JobSubmitted(user_job(1)));
         let snap = fsm.snapshot();
         let d = shadow.place(snap.graph(), snap.job(JobId(1)).unwrap(), snap.now, true);
-        assert!(matches!(d, Decision::Reserve { .. }), "primary decision is what gets applied");
+        assert!(
+            matches!(d, Decision::Reserve { .. }),
+            "primary decision is what gets applied"
+        );
         let diffs = shadow.diffs.lock().unwrap();
         assert_eq!(diffs.len(), 1);
-        assert!(matches!(diffs[0].candidate, Decision::Start { .. }), "candidate would backfill now");
+        assert!(
+            matches!(diffs[0].candidate, Decision::Start { .. }),
+            "candidate would backfill now"
+        );
     }
 }

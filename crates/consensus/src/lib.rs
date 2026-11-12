@@ -23,19 +23,27 @@ pub struct ConsensusNode {
 
 /// Propose a cluster mutation (client_write on the leader).
 pub async fn propose(
-    raft: &SchedulerRaft, ev: gnomon_core::Event,
+    raft: &SchedulerRaft,
+    ev: gnomon_core::Event,
 ) -> Result<
     openraft::raft::ClientWriteResponse<TypeConfig>,
-    openraft::error::RaftError<NodeId, openraft::error::ClientWriteError<NodeId, openraft::BasicNode>>,
+    openraft::error::RaftError<
+        NodeId,
+        openraft::error::ClientWriteError<NodeId, openraft::BasicNode>,
+    >,
 > {
     raft.client_write(Request(ev)).await
 }
 
 pub fn default_config() -> Arc<Config> {
-    Arc::new(Config {
-        heartbeat_interval: 250,
-        election_timeout_min: 800,
-        election_timeout_max: 1600,
-        ..Default::default()
-    }.validate().expect("valid raft config"))
+    Arc::new(
+        Config {
+            heartbeat_interval: 250,
+            election_timeout_min: 800,
+            election_timeout_max: 1600,
+            ..Default::default()
+        }
+        .validate()
+        .expect("valid raft config"),
+    )
 }

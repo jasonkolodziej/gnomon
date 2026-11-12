@@ -28,7 +28,11 @@ fn make_fsm(nodes: u32) -> Arc<Fsm> {
     for n in 0..nodes {
         fsm.apply(Event::NodeRegistered {
             name: format!("node{n:04}"),
-            capacity: Resources { cores: 32, mem_mb: 131072, gpus: 4 },
+            capacity: Resources {
+                cores: 32,
+                mem_mb: 131072,
+                gpus: 4,
+            },
         });
     }
     fsm
@@ -37,12 +41,29 @@ fn make_fsm(nodes: u32) -> Arc<Fsm> {
 fn submit_jobs(fsm: &Fsm, count: u64, start_id: u64) {
     for i in 0..count {
         let req = match i % 4 {
-            0 => Resources { cores: 16, mem_mb: 32768, gpus: 2 },
-            1 => Resources { cores: 8, mem_mb: 16384, gpus: 1 },
-            _ => Resources { cores: 4, mem_mb: 8192, gpus: 0 },
+            0 => Resources {
+                cores: 16,
+                mem_mb: 32768,
+                gpus: 2,
+            },
+            1 => Resources {
+                cores: 8,
+                mem_mb: 16384,
+                gpus: 1,
+            },
+            _ => Resources {
+                cores: 4,
+                mem_mb: 8192,
+                gpus: 0,
+            },
         };
-        let mut job = Job::new(gnomon_core::JobId(start_id + i),
-            &format!("bench-{i}"), "bench", req, Walltime(Duration::from_secs(300)));
+        let mut job = Job::new(
+            gnomon_core::JobId(start_id + i),
+            &format!("bench-{i}"),
+            "bench",
+            req,
+            Walltime(Duration::from_secs(300)),
+        );
         job.priority = 10_000_000 - i;
         fsm.apply(Event::JobSubmitted(job));
     }
@@ -62,12 +83,19 @@ fn bench_serial(fsm: &Fsm) -> (u64, Duration) {
         let dur = job.walltime.0.as_secs();
         if let Some((verts, start)) = graph.match_request(&job.request, now, dur, job.id.0) {
             if graph.commit(&verts, &job.request, start, dur) {
-                events.push(Event::JobStarted { job: job.id, vertices: verts, start, dur: None });
+                events.push(Event::JobStarted {
+                    job: job.id,
+                    vertices: verts,
+                    start,
+                    dur: None,
+                });
                 committed += 1;
             }
         }
     }
-    for ev in events { fsm.apply(ev); }
+    for ev in events {
+        fsm.apply(ev);
+    }
     (committed, t0.elapsed())
 }
 
@@ -79,24 +107,33 @@ fn bench_parallel(fsm: &Fsm, policy: Arc<dyn Policy>, workers: usize) -> (u64, D
     let jobs: Vec<Job> = snap.pending_jobs().cloned().collect();
 
     // Phase 1 (parallel): pure plan computation, read-only.
-    let chunks: Vec<Vec<Job>> = jobs.chunks((jobs.len() / workers.max(1)).max(1))
-        .map(|c| c.to_vec()).collect();
+    let chunks: Vec<Vec<Job>> = jobs
+        .chunks((jobs.len() / workers.max(1)).max(1))
+        .map(|c| c.to_vec())
+        .collect();
     std::thread::scope(|s| {
         let mut handles = Vec::new();
         for chunk in chunks {
             let (snap, policy) = (snap.clone(), policy.clone());
             handles.push(s.spawn(move || {
-                chunk.iter().map(|j| policy.schedule(&snap, j)).collect::<Vec<Plan>>()
+                chunk
+                    .iter()
+                    .map(|j| policy.schedule(&snap, j))
+                    .collect::<Vec<Plan>>()
             }));
         }
         let mut plans: Vec<Plan> = Vec::new();
-        for h in handles.drain(..) { plans.extend(h.join().unwrap()); }
+        for h in handles.drain(..) {
+            plans.extend(h.join().unwrap());
+        }
 
         // Phase 2 (serial applier): commit; the FSM's graph layer
         // revalidates every reservation at commit time. Conflicts are
         // simply not committed (job stays Pending).
         for plan in &plans {
-            let Some(ev) = plan.decision.to_event(plan.job) else { continue };
+            let Some(ev) = plan.decision.to_event(plan.job) else {
+                continue;
+            };
             fsm.apply(ev);
         }
 
@@ -105,7 +142,9 @@ fn bench_parallel(fsm: &Fsm, policy: Arc<dyn Policy>, workers: usize) -> (u64, D
         loop {
             let snap2 = fsm.snapshot();
             let pending: Vec<Job> = snap2.pending_jobs().cloned().collect();
-            if pending.is_empty() { break; }
+            if pending.is_empty() {
+                break;
+            }
             let mut progress = false;
             let now = gnomon_core::now_secs();
             let mut graph = snap2.graph().clone();
@@ -114,15 +153,28 @@ fn bench_parallel(fsm: &Fsm, policy: Arc<dyn Policy>, workers: usize) -> (u64, D
                 let dur = j.walltime.0.as_secs();
                 if let Some((verts, start)) = graph.match_request(&j.request, now, dur, j.id.0) {
                     if graph.commit(&verts, &j.request, start, dur) {
-                        evs.push(Event::JobStarted { job: j.id, vertices: verts, start, dur: None });
+                        evs.push(Event::JobStarted {
+                            job: j.id,
+                            vertices: verts,
+                            start,
+                            dur: None,
+                        });
                         progress = true;
                     }
                 }
             }
-            for ev in evs { fsm.apply(ev); }
-            if !progress { break; }
+            for ev in evs {
+                fsm.apply(ev);
+            }
+            if !progress {
+                break;
+            }
         }
-        let committed = fsm.snapshot().state().jobs.values()
+        let committed = fsm
+            .snapshot()
+            .state()
+            .jobs
+            .values()
             .filter(|j| !matches!(j.state, gnomon_core::JobState::Pending))
             .count() as u64;
         (committed, t0.elapsed())
@@ -136,13 +188,21 @@ fn main() {
         let fsm = make_fsm(nodes);
         submit_jobs(&fsm, jobs, 1);
         let (c, d) = bench_serial(&fsm);
-        println!("serial,{nodes},{jobs},1,{c},{},{:.0}", d.as_millis(), c as f64 / d.as_secs_f64());
+        println!(
+            "serial,{nodes},{jobs},1,{c},{},{:.0}",
+            d.as_millis(),
+            c as f64 / d.as_secs_f64()
+        );
 
         for workers in [1usize, 2, 4, 8] {
             let fsm = make_fsm(nodes);
             submit_jobs(&fsm, jobs, 1);
             let (c, d) = bench_parallel(&fsm, policy.clone(), workers);
-            println!("parallel,{nodes},{jobs},{workers},{c},{},{:.0}", d.as_millis(), c as f64 / d.as_secs_f64());
+            println!(
+                "parallel,{nodes},{jobs},{workers},{c},{},{:.0}",
+                d.as_millis(),
+                c as f64 / d.as_secs_f64()
+            );
         }
     }
 }

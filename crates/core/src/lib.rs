@@ -9,8 +9,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Monotonic job identifier (Raft log index compatible).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct JobId(pub u64);
 
 impl fmt::Display for JobId {
@@ -21,8 +20,7 @@ impl fmt::Display for JobId {
 
 /// Slurm-style job lifecycle. Transitions only happen through FSM events,
 /// so every state change is replicated and replayable.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum JobState {
     Pending,
     /// Backfilled: has a reservation but start time is in the future.
@@ -35,8 +33,7 @@ pub enum JobState {
 
 /// Multi-dimensional resource request. Unlike Slurm's GRES side-attributes,
 /// every dimension is first-class and matched inside the resource graph.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Resources {
     pub cores: u32,
     pub mem_mb: u64,
@@ -82,11 +79,16 @@ impl CapacityProfile {
     pub fn daily(steps: Vec<(u64, Resources)>) -> Self {
         let mut steps = steps;
         steps.sort_by_key(|s| s.0);
-        CapacityProfile { period: Some(86_400), steps }
+        CapacityProfile {
+            period: Some(86_400),
+            steps,
+        }
     }
 
     pub fn at(&self, base: &Resources, t: u64) -> Resources {
-        if self.steps.is_empty() { return *base; }
+        if self.steps.is_empty() {
+            return *base;
+        }
         match self.period {
             Some(p) if p > 0 => {
                 let ph = t % p;
@@ -95,7 +97,13 @@ impl CapacityProfile {
                     None => self.steps.last().unwrap().1, // wrapped from previous period
                 }
             }
-            _ => self.steps.iter().rev().find(|s| s.0 <= t).map(|s| s.1).unwrap_or(*base),
+            _ => self
+                .steps
+                .iter()
+                .rev()
+                .find(|s| s.0 <= t)
+                .map(|s| s.1)
+                .unwrap_or(*base),
         }
     }
 
@@ -107,7 +115,9 @@ impl CapacityProfile {
                 while k * p < b {
                     for s in &self.steps {
                         let t = k * p + s.0;
-                        if t > a && t < b { out.push(t); }
+                        if t > a && t < b {
+                            out.push(t);
+                        }
                     }
                     k += 1;
                 }
@@ -119,13 +129,11 @@ impl CapacityProfile {
 
 /// Walltime estimate; drives backfill reservations (the "time axis" that
 /// section 5.2 identifies as the novel optimistic-concurrency target).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Walltime(pub Duration);
 
 /// A submitted job.
-#[derive(Clone, Debug, PartialEq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Job {
     pub id: JobId,
     pub name: String,
@@ -172,33 +180,65 @@ impl Job {
 /// `dur` on start/reserve is the *planned* span length the scheduler chose
 /// (a runtime prediction when distribution-aware backfill is on); `None`
 /// means "plan for the full walltime", the classic behaviour.
-#[derive(Clone, Debug, PartialEq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Event {
     JobSubmitted(Job),
     JobCancelled(JobId),
     /// Immediate start on the given graph vertices at `start` time.
-    JobStarted { job: JobId, vertices: Vec<u32>, start: u64, #[serde(default)] dur: Option<u64> },
+    JobStarted {
+        job: JobId,
+        vertices: Vec<u32>,
+        start: u64,
+        #[serde(default)]
+        dur: Option<u64>,
+    },
     /// Backfill reservation: earliest start is `start` on `vertices`.
-    JobReserved { job: JobId, vertices: Vec<u32>, start: u64, #[serde(default)] dur: Option<u64> },
+    JobReserved {
+        job: JobId,
+        vertices: Vec<u32>,
+        start: u64,
+        #[serde(default)]
+        dur: Option<u64>,
+    },
     /// Releases the job's planner spans at `end` (early completion frees
     /// the rest of the reserved window for backfill).
-    JobFinished { job: JobId, end: u64, code: i32 },
+    JobFinished {
+        job: JobId,
+        end: u64,
+        code: i32,
+    },
     /// A running job outlived its planned span: extend it to `new_end`
     /// (never past walltime). Emitted by distribution-aware planning.
-    JobExtended { job: JobId, new_end: u64 },
+    JobExtended {
+        job: JobId,
+        new_end: u64,
+    },
     /// Drop every not-yet-started reservation and return those jobs to
     /// Pending so the next pass can re-plan (conservative backfill with
     /// compression).
-    ReservationsCleared { now: u64 },
-    NodeRegistered { name: String, capacity: Resources },
+    ReservationsCleared {
+        now: u64,
+    },
+    NodeRegistered {
+        name: String,
+        capacity: Resources,
+    },
     /// An agent fetched the first `count` queued assignments for `node`;
     /// drop them so work is dispatched exactly once.
-    AssignmentsFetched { node: String, count: usize },
+    AssignmentsFetched {
+        node: String,
+        count: usize,
+    },
     /// Set (or clear) a node's time-varying capacity (power cap, carbon
     /// window). Replicated like any other change, so replay honours it.
-    NodeProfileSet { name: String, profile: Option<CapacityProfile> },
-    Heartbeat { name: String, allocated: Resources },
+    NodeProfileSet {
+        name: String,
+        profile: Option<CapacityProfile>,
+    },
+    Heartbeat {
+        name: String,
+        allocated: Resources,
+    },
 }
 
 /// Time source. Production uses wall-clock time; replay and simulation use a
@@ -210,18 +250,26 @@ pub trait Clock: Send + Sync + fmt::Debug {
 #[derive(Debug, Default)]
 pub struct SystemClock;
 impl Clock for SystemClock {
-    fn now(&self) -> u64 { now_secs() }
+    fn now(&self) -> u64 {
+        now_secs()
+    }
 }
 
 /// Manually advanced clock (simulation / replay).
 #[derive(Debug, Default)]
 pub struct ManualClock(std::sync::atomic::AtomicU64);
 impl ManualClock {
-    pub fn new(t: u64) -> Self { ManualClock(std::sync::atomic::AtomicU64::new(t)) }
-    pub fn set(&self, t: u64) { self.0.store(t, std::sync::atomic::Ordering::Release) }
+    pub fn new(t: u64) -> Self {
+        ManualClock(std::sync::atomic::AtomicU64::new(t))
+    }
+    pub fn set(&self, t: u64) {
+        self.0.store(t, std::sync::atomic::Ordering::Release)
+    }
 }
 impl Clock for ManualClock {
-    fn now(&self) -> u64 { self.0.load(std::sync::atomic::Ordering::Acquire) }
+    fn now(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 /// The Raft index of the last applied event — the optimistic-concurrency
@@ -230,11 +278,16 @@ impl Clock for ManualClock {
 pub type StateIndex = u64;
 
 pub fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 impl Walltime {
-    pub fn secs(&self) -> u64 { self.0.as_secs() }
+    pub fn secs(&self) -> u64 {
+        self.0.as_secs()
+    }
 }
 
 /// Node agent registry entry kept in the FSM (phase 4).

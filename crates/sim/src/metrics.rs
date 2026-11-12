@@ -21,27 +21,47 @@ pub struct Summary {
 }
 
 fn pct(v: &mut [f64], q: f64) -> f64 {
-    if v.is_empty() { return 0.0; }
+    if v.is_empty() {
+        return 0.0;
+    }
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v[(((v.len() - 1) as f64) * q).round() as usize]
 }
 
 pub fn summarize(r: &SimResult, machine_cores: u32) -> Summary {
     let o = &r.outcomes;
-    if o.is_empty() { return Summary { policy: r.policy.clone(), ..Default::default() }; }
+    if o.is_empty() {
+        return Summary {
+            policy: r.policy.clone(),
+            ..Default::default()
+        };
+    }
     let n = o.len() as f64;
     let mut waits: Vec<f64> = o.iter().map(|x| (x.start - x.submit) as f64).collect();
     let mean_wait = waits.iter().sum::<f64>() / n;
-    let bsld = o.iter().map(|x| {
-        let run = (x.end - x.start) as f64;
-        (((x.start - x.submit) as f64 + run) / run.max(10.0)).max(1.0)
-    }).sum::<f64>() / n;
+    let bsld = o
+        .iter()
+        .map(|x| {
+            let run = (x.end - x.start) as f64;
+            (((x.start - x.submit) as f64 + run) / run.max(10.0)).max(1.0)
+        })
+        .sum::<f64>()
+        / n;
     let wide: Vec<&Outcome> = o.iter().filter(|x| x.cores * 4 >= machine_cores).collect();
-    let wide_wait = if wide.is_empty() { 0.0 } else {
-        wide.iter().map(|x| (x.start - x.submit) as f64).sum::<f64>() / wide.len() as f64 };
+    let wide_wait = if wide.is_empty() {
+        0.0
+    } else {
+        wide.iter()
+            .map(|x| (x.start - x.submit) as f64)
+            .sum::<f64>()
+            / wide.len() as f64
+    };
     let t0 = o.iter().map(|x| x.submit).min().unwrap();
     let t1 = o.iter().map(|x| x.end).max().unwrap();
-    let work: f64 = o.iter().map(|x| (x.end - x.start) as f64 * x.cores as f64).sum();
+    let work: f64 = o
+        .iter()
+        .map(|x| (x.end - x.start) as f64 * x.cores as f64)
+        .sum();
     Summary {
         policy: r.policy.clone(),
         jobs: o.len(),
@@ -65,7 +85,13 @@ pub struct EnergySummary {
     pub kg_co2: f64,
 }
 
-pub fn energy(r: &SimResult, cap: &CapacityProfile, base: u32, carbon_g_per_kwh: &[f64; 24], watts_per_core: f64) -> EnergySummary {
+pub fn energy(
+    r: &SimResult,
+    cap: &CapacityProfile,
+    base: u32,
+    carbon_g_per_kwh: &[f64; 24],
+    watts_per_core: f64,
+) -> EnergySummary {
     // Step function of usage.
     let mut ev: Vec<(u64, i64)> = Vec::new();
     for x in &r.outcomes {
@@ -73,19 +99,29 @@ pub fn energy(r: &SimResult, cap: &CapacityProfile, base: u32, carbon_g_per_kwh:
         ev.push((x.end, -(x.cores as i64)));
     }
     ev.sort();
-    let base_r = Resources { cores: base, mem_mb: 0, gpus: 0 };
+    let base_r = Resources {
+        cores: base,
+        mem_mb: 0,
+        gpus: 0,
+    };
     let mut pts: Vec<u64> = ev.iter().map(|e| e.0).collect();
     if let (Some(&a), Some(&b)) = (pts.first(), pts.last()) {
         cap.breakpoints(a, b, &mut pts);
         let mut h = (a / 3600 + 1) * 3600;
-        while h < b { pts.push(h); h += 3600; }
+        while h < b {
+            pts.push(h);
+            h += 3600;
+        }
     }
     pts.sort_unstable();
     pts.dedup();
     let (mut used, mut ei) = (0i64, 0usize);
     let mut out = EnergySummary::default();
     for w in pts.windows(2) {
-        while ei < ev.len() && ev[ei].0 <= w[0] { used += ev[ei].1; ei += 1; }
+        while ei < ev.len() && ev[ei].0 <= w[0] {
+            used += ev[ei].1;
+            ei += 1;
+        }
         let dt = (w[1] - w[0]) as f64 / 3600.0;
         let c = cap.at(&base_r, w[0]).cores as i64;
         if used > c {

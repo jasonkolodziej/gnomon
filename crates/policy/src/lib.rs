@@ -44,26 +44,42 @@ impl Default for PolicyConfig {
             weight_jobsize: 100,
             weight_qos: 10000,
             qos_tiers: vec![
-                QosTier { name: "normal".into(), priority_boost: 0, max_walltime_secs: 86400 },
-                QosTier { name: "high".into(), priority_boost: 5000, max_walltime_secs: 43200 },
+                QosTier {
+                    name: "normal".into(),
+                    priority_boost: 0,
+                    max_walltime_secs: 86400,
+                },
+                QosTier {
+                    name: "high".into(),
+                    priority_boost: 5000,
+                    max_walltime_secs: 43200,
+                },
             ],
             partitions: vec![PartitionLimit {
-                name: "normal".into(), max_cores_per_user: 512,
-                max_gpus_per_user: 64, max_running_jobs_per_user: 128,
+                name: "normal".into(),
+                max_cores_per_user: 512,
+                max_gpus_per_user: 64,
+                max_running_jobs_per_user: 128,
             }],
         }
     }
 }
 
 impl PolicyConfig {
-    pub fn from_json(s: &str) -> Result<Self, serde_json::Error> { serde_json::from_str(s) }
+    pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(s)
+    }
 
     /// Pure priority function: age + size + QoS (a Slurm multifactor subset).
     pub fn priority(&self, job: &Job, now: u64, qos: &str) -> u64 {
         let age = now.saturating_sub(job.submit_time) / 60; // minutes waited
         let size = (job.request.cores as u64) + 4 * (job.request.gpus as u64);
-        let qos_boost = self.qos_tiers.iter()
-            .find(|t| t.name == qos).map(|t| t.priority_boost).unwrap_or(0);
+        let qos_boost = self
+            .qos_tiers
+            .iter()
+            .find(|t| t.name == qos)
+            .map(|t| t.priority_boost)
+            .unwrap_or(0);
         self.weight_age * age + self.weight_jobsize * size + self.weight_qos * qos_boost / 1000
     }
 
@@ -98,7 +114,8 @@ impl WasmPriorityPlugin {
     pub fn priority(&self, job_json: &str) -> anyhow::Result<u64> {
         let mut store = wasmtime::Store::new(&self.engine, ());
         let instance = wasmtime::Instance::new(&mut store, &self.module, &[])?;
-        let memory = instance.get_memory(&mut store, "memory")
+        let memory = instance
+            .get_memory(&mut store, "memory")
             .ok_or_else(|| anyhow::anyhow!("plugin must export memory"))?;
         let alloc = instance.get_typed_func::<u32, u32>(&mut store, "alloc")?;
         let prio = instance.get_typed_func::<(u32, u32), u64>(&mut store, "priority")?;
@@ -118,13 +135,30 @@ mod tests {
     #[test]
     fn declarative_priority_and_limits() {
         let cfg = PolicyConfig::default();
-        let mut j = Job::new(JobId(1), "a", "u",
-            Resources { cores: 8, mem_mb: 0, gpus: 1 }, Walltime(Duration::from_secs(3600)));
+        let mut j = Job::new(
+            JobId(1),
+            "a",
+            "u",
+            Resources {
+                cores: 8,
+                mem_mb: 0,
+                gpus: 1,
+            },
+            Walltime(Duration::from_secs(3600)),
+        );
         j.submit_time = 0;
         let p_high = cfg.priority(&j, 3600, "high");
         let p_norm = cfg.priority(&j, 3600, "normal");
         assert!(p_high > p_norm);
-        assert!(cfg.admits(&j, 10, &Resources { cores: 100, mem_mb: 0, gpus: 10 }));
+        assert!(cfg.admits(
+            &j,
+            10,
+            &Resources {
+                cores: 100,
+                mem_mb: 0,
+                gpus: 10
+            }
+        ));
         assert!(!cfg.admits(&j, 200, &Resources::default())); // running-jobs limit
     }
 
