@@ -7,5 +7,5 @@ description = "Policy-as-data: fairshare/QoS/limits config + wasmtime-sandboxed 
 gnomon-core = { path = "../core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-wasmtime = "25"
+wasmtime = "36.0.20"
 anyhow = "1"
