@@ -1,0 +1,23 @@
+[package]
+version = "0.1.0"
+edition = "2021"
+name = "gnomon-cli"
+description = "Slurm-compatible CLI shims (gnbatch, gnqueue, gncancel, gninfo) for sbatch, squeue, scancel, sinfo"
+[dependencies]
+gnomon-api = { path = "../api" }
+tonic = "0.12"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+[[bin]]
+name = "gnbatch"
+path = "src/bin/gnbatch.rs"
+[[bin]]
+name = "gnqueue"
+path = "src/bin/gnqueue.rs"
+[[bin]]
+name = "gncancel"
+path = "src/bin/gncancel.rs"
+[[bin]]
+name = "gninfo"
+path = "src/bin/gninfo.rs"

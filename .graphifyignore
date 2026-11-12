@@ -1,9 +1,20 @@
 # Paths graphify skips when a target in .github/graphify/targets.txt covers them
-# (gitignore syntax; .gitignore is honoured too).
+# (gitignore syntax; .gitignore is honoured too, so target/ and testkit/out/ are already skipped).
+# The only target is "." (the whole repository), so this file decides what the graph covers.
 
-# Vendored graphify source shipped as an agent skill: large, and not this project's code.
-.agents/skills/graphify/
+# Vendored agent skills and the template's own tooling: not this project's code.
+.agents/
+.github/
+.vscode/
 
-# Generated output
+# Generated output, build artefacts and data
 graphify-out/
 _site/
+target/
+Cargo.lock
+results/
+assets/
+bench_results.csv
+
+# Agent/editor config at the repository root (.mcp.json, skills-lock.json)
+/*.json

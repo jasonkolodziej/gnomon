@@ -1,0 +1,57 @@
+syntax = "proto3";
+package gnomon.v1;
+
+service Scheduler {
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobReply);
+  rpc CancelJob(CancelJobRequest) returns (CancelJobReply);
+  rpc GetJob(GetJobRequest) returns (GetJobReply);
+  rpc ListJobs(ListJobsRequest) returns (ListJobsReply);
+  rpc ListNodes(ListNodesRequest) returns (ListNodesReply);
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeReply);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatReply);
+  rpc FetchWork(FetchWorkRequest) returns (FetchWorkReply);
+  rpc ReportCompletion(ReportCompletionRequest) returns (ReportCompletionReply);
+}
+
+message Resources { uint32 cores = 1; uint64 mem_mb = 2; uint32 gpus = 3; }
+
+message SubmitJobRequest {
+  string name = 1; string user = 2; string partition = 3;
+  Resources request = 4; uint64 walltime_secs = 5;
+  uint64 priority = 6; string command = 7;
+}
+message SubmitJobReply { uint64 job_id = 1; }
+message CancelJobRequest { uint64 job_id = 1; string user = 2; }
+message CancelJobReply { bool ok = 1; }
+message GetJobRequest { uint64 job_id = 1; uint64 wait_index = 2; }
+message GetJobReply { JobInfo job = 1; }
+message ListJobsRequest { string user = 1; string state = 2; }
+message ListJobsReply { repeated JobInfo jobs = 1; uint64 state_index = 2; }
+message ListNodesRequest {}
+message ListNodesReply { repeated NodeInfo nodes = 1; }
+
+message JobInfo {
+  uint64 id = 1; string name = 2; string user = 3; string partition = 4;
+  string state = 5; Resources request = 6; uint64 walltime_secs = 7;
+  uint64 priority = 8; uint64 submit_time = 9; uint64 planned_start = 10;
+  repeated string nodes = 11;
+}
+
+message NodeInfo {
+  string name = 1; Resources capacity = 2; Resources allocated = 3;
+  uint64 last_heartbeat = 4; bool alive = 5;
+}
+
+message RegisterNodeRequest { string name = 1; Resources capacity = 2; }
+message RegisterNodeReply { bool ok = 1; uint64 heartbeat_interval_secs = 2; }
+message HeartbeatRequest { string name = 1; Resources allocated = 2; }
+message HeartbeatReply { bool ok = 1; }
+
+message FetchWorkRequest { string node = 1; }
+message FetchWorkReply {
+  message Assignment { uint64 job_id = 1; string command = 2; Resources request = 3; uint64 start = 4;
+                       uint64 walltime_secs = 5; string name = 6; }
+  repeated Assignment assignments = 1;
+}
+message ReportCompletionRequest { string node = 1; uint64 job_id = 2; int32 exit_code = 3; }
+message ReportCompletionReply { bool ok = 1; }

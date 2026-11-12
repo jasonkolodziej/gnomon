@@ -27,7 +27,8 @@ How the targets become one graph:
 
 Either way, node `source_file` paths are relative to the target directory, not the repository root.
 
-In this template repository the only target is `skills/`.
+In this repository the only target is `.` (the whole repository, code-only), narrowed by `.graphifyignore` to the
+Rust crates and `testkit/`. See [Graph coverage in this repository](#graph-coverage-in-this-repository).
 
 ## What the template ships
 
@@ -272,23 +273,33 @@ GRAPHIFY_API_KEY="$(openssl rand -hex 32)" graphify-mcp graphify-out/graph.json 
 
 MCP clients then connect to `http://<host>:8099/mcp` and send `Authorization: Bearer <key>`.
 
-## Testing in this template repository
+## Graph coverage in this repository
 
-`skills/` is the only target, with mode `full`, so it is built straight into `./graphify-out/`. It is almost
-entirely Markdown, so:
+The single target is `.` in `code-only` mode, built straight into `./graphify-out/`, so node `source_file` paths
+are repository-root paths (`crates/sched/src/lib.rs`). `.graphifyignore` limits it to the project's own code:
 
-- **Without** an LLM key, the build runs in code-only mode and only graphs the handful of `.ts`, `.sh`,
-  `.json`, `.yml` and `.toml` files. That shows the pipeline works but gives a sparse graph.
-- **With** `ANTHROPIC_API_KEY` (or another key) set as a repository secret, every `SKILL.md` and reference doc
-  is extracted semantically and the communities are named. Expect a one-off LLM cost on the first build;
-  later builds re-extract only changed files.
+| Graphed | Not graphed |
+| --- | --- |
+| `crates/*/src/**/*.rs` (libraries, `src/bin/*`, `build.rs`): types, traits, functions, methods, `use` imports and calls, including cross-crate edges (`gnomon_core::Resources` used by `gnomon-graph`) | `docs/`: Markdown is skipped in `code-only` mode |
+| `testkit/*.sh`, `testkit/compare.py` | `proto/gnomon.proto`: no `.proto` extractor; the generated `gnomon_api::pb` code lives in `target/` |
+| | `Cargo.toml` files (parsed, but yield no symbols), `Cargo.lock`, `results/`, `assets/`, `target/` |
+| | Template tooling: `.github/`, `.agents/`, `.vscode/`, root `*.json` |
 
-To try it:
+Rust has no extra setup: graphify's tree-sitter extractor handles `.rs` files without an API key, so CI builds
+the graph with no secrets. To also graph the design report in `docs/`, add a second target `docs full` (needs
+an API key secret, see step 2). With two targets the graph becomes a merged graph and node ids gain a
+`<dir>::` prefix: update `.github/instructions/graphify.instructions.md` to match.
 
-1. Merge to `main`, or run **Actions → Graphify → Run workflow** with *targets* = `skills`.
-2. Check that `graphify-out/graph.json` and `graphify-out/GRAPH_REPORT.md` were committed at the repository root.
-3. Run `graphify query "turnstile siteverify"` locally, or ask Copilot or Claude a question about the skills and
-   confirm it uses the `graphify` MCP tools.
+To check it:
+
+```bash
+bash .github/graphify/update.sh                  # rebuild locally (seconds)
+graphify god-nodes                               # Fsm, Job, Resources, JobId, ResourceGraph, Event, ...
+graphify query "ResourceGraph"                   # the resource graph and its per-vertex Planners
+graphify path "QuantileEstimator" "BackfillPolicy"
+```
+
+Or ask Copilot or Claude a question about the scheduler and confirm it uses the `graphify` MCP tools.
 
 ## Troubleshooting
 

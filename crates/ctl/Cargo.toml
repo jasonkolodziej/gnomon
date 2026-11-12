@@ -1,0 +1,13 @@
+[package]
+version = "0.1.0"
+edition = "2021"
+name = "gnomon-ctl"
+description = "Controller daemon: FSM + broker + workers + applier + gRPC API"
+[dependencies]
+gnomon-core = { path = "../core" }
+gnomon-fsm = { path = "../fsm" }
+gnomon-sched = { path = "../sched" }
+gnomon-api = { path = "../api" }
+gnomon-policy = { path = "../policy" }
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"

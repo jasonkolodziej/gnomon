@@ -39,28 +39,20 @@ jobs:
           python -m pip install --disable-pip-version-check "graphifyy[mcp]${GRAPHIFY_VERSION:+==${GRAPHIFY_VERSION}}"
           graphify --version
 
-      # ---------------------------------------------------------------
-      # Add project-specific setup steps below.
-      # Examples: install Node.js, Python, Go, or other runtimes;
-      # restore dependency caches; install CLI tools, etc.
-      # ---------------------------------------------------------------
+      # Rust toolchain + protoc so the agent can build and test the Cargo workspace
+      # (gnomon-api compiles proto/gnomon.proto with tonic-build).
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
 
-      # Example: Node.js setup (uncomment and adapt as needed)
-      # - name: Set up Node.js
-      #   uses: actions/setup-node@v4
-      #   with:
-      #     node-version: "20"
-      #     cache: "npm"
-      #
-      # - name: Install dependencies
-      #   run: npm ci
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-      # Example: Python setup (uncomment and adapt as needed)
-      # - name: Set up Python
-      #   uses: actions/setup-python@v5
-      #   with:
-      #     python-version: "3.12"
-      #     cache: "pip"
-      #
-      # - name: Install dependencies
-      #   run: pip install -r requirements.txt
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+
+      - name: Fetch and build dependencies
+        run: cargo build --workspace --all-targets --locked

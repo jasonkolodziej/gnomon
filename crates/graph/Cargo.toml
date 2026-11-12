@@ -1,0 +1,8 @@
+[package]
+version = "0.1.0"
+edition = "2021"
+name = "gnomon-graph"
+description = "Directed resource graph with per-vertex temporal planners (Fluxion-style)"
+[dependencies]
+gnomon-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }

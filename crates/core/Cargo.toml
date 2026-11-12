@@ -1,0 +1,8 @@
+[package]
+version = "0.1.0"
+edition = "2021"
+name = "gnomon-core"
+description = "Core types: jobs, resources, events (Slurm-compatible vocabulary)"
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = "1"

@@ -1,0 +1,9 @@
+[package]
+version = "0.1.0"
+edition = "2021"
+name = "gnomon-sched"
+description = "Optimistic parallel scheduler: coalescing eval broker, worker pool, serialized plan applier"
+[dependencies]
+gnomon-core = { path = "../core" }
+gnomon-fsm = { path = "../fsm" }
+gnomon-graph = { path = "../graph" }
