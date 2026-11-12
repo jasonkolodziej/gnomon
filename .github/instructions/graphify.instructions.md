@@ -11,7 +11,7 @@ at the repository root, graphify's default location, so no `--graph` flag is nee
 - `graphify-out/GRAPH_REPORT.md`: broad architecture overview (god nodes, communities).
 - `graphify-out/wiki/index.md`: navigation, when present.
 
-The graph covers only the directories listed in `.github/graphify/targets.txt` (currently `skills/`).
+The graph covers only the directories listed in `.github/graphify/targets.txt` (currently `crates/`).
 
 ## Rules
 
@@ -23,7 +23,7 @@ The graph covers only the directories listed in `.github/graphify/targets.txt` (
     `graphify explain "<X>"` for one concept.
   - Neither available: read `graphify-out/GRAPH_REPORT.md` first.
 - Node `source_file` paths are relative to the graphed directory, not the repository root. With one target, prefix
-  the directory from `targets.txt` (`turnstile-spin/scripts/validate.sh` is `skills/turnstile-spin/scripts/validate.sh`).
+  the directory from `targets.txt` (`sched/src/lib.rs` is `crates/sched/src/lib.rs`).
   With several targets, node ids start with `<dir>::` and the node's `repo` attribute names the directory.
 - Queries match node labels, so use symbol, file or concept names rather than whole sentences. Exit code 4 means
   no match (try other names); exit code 3 means ambiguous (pick from the listed candidates).

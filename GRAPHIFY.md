@@ -27,7 +27,7 @@ How the targets become one graph:
 
 Either way, node `source_file` paths are relative to the target directory, not the repository root.
 
-In this template repository the only target is `skills/`.
+In this repository the only target is `crates/` (the Gnomon Rust workspace).
 
 ## What the template ships
 
