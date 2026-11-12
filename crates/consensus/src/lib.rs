@@ -22,6 +22,7 @@ pub struct ConsensusNode {
 }
 
 /// Propose a cluster mutation (client_write on the leader).
+#[allow(clippy::result_large_err)]
 pub async fn propose(
     raft: &SchedulerRaft,
     ev: gnomon_core::Event,

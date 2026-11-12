@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tonic::{Request, Response, Status};
 
+#[allow(clippy::result_large_err)]
 pub mod pb {
     tonic::include_proto!("gnomon.v1");
 }
