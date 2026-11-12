@@ -103,7 +103,7 @@ exit codes) unchanged against Gnomon or a Slurm cluster and compares the two —
 | [`rust.yml`](.github/workflows/rust.yml) | push to `main`, pull requests | `cargo fmt --check`, `cargo clippy -D warnings`, build + `cargo test`, `cargo doc` with `-D warnings` |
 | [`audit.yml`](.github/workflows/audit.yml) | `Cargo.toml`/`Cargo.lock` changes, weekly | `cargo audit` against the RustSec advisory database |
 | [`ci.yml`](.github/workflows/ci.yml) | push to `main`, pull requests | YAML validation and secret-pattern scan |
-| [`graphify.yml`](.github/workflows/graphify.yml) | push to `main`, pull requests | Rebuilds the `crates/` knowledge graph (see [GRAPHIFY.md](GRAPHIFY.md)) |
+| [`graphify.yml`](.github/workflows/graphify.yml) | push to `main`, pull requests | Rebuilds the knowledge graph of the Rust crates and `testkit/` (see [GRAPHIFY.md](GRAPHIFY.md)) |
 
 CI installs `protoc` from `protobuf-compiler`; do the same locally (or set `PROTOC`) before building.
 

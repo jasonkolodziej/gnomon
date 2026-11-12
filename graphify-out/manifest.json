@@ -208,5 +208,42 @@
     "seen": 1794512445.5273795,
     "ast_hash": "ce62b604a5f9a450eb06e6b3315c74b4",
     "semantic_hash": "ce62b604a5f9a450eb06e6b3315c74b4"
+  },
+  "Cargo.toml": {
+    "mtime": 1794512005.8384774,
+    "seen": 1794512530.5052683,
+    "ast_hash": "c69fc7afd8a17058aa14380aeefd020c",
+    "semantic_hash": "c69fc7afd8a17058aa14380aeefd020c",
+    "ast_empty": true
+  },
+  "testkit/compare.py": {
+    "mtime": 1794512005.8394384,
+    "seen": 1794512530.506667,
+    "ast_hash": "935816fe8652eef1ffb94e2bf80f7efb",
+    "semantic_hash": "935816fe8652eef1ffb94e2bf80f7efb"
+  },
+  "testkit/jobs/record.sh": {
+    "mtime": 1794512005.8394208,
+    "seen": 1794512530.5066829,
+    "ast_hash": "7af687755a6a3724c5a866ce3cf85bca",
+    "semantic_hash": "7af687755a6a3724c5a866ce3cf85bca"
+  },
+  "testkit/lib.sh": {
+    "mtime": 1794512005.8394732,
+    "seen": 1794512530.5066996,
+    "ast_hash": "b65afe1502be3ca41e0862234ec9cde1",
+    "semantic_hash": "b65afe1502be3ca41e0862234ec9cde1"
+  },
+  "testkit/local-cluster.sh": {
+    "mtime": 1794512005.8394566,
+    "seen": 1794512530.5067134,
+    "ast_hash": "0dc253ead99ae1fb0da1014ce74f1667",
+    "semantic_hash": "0dc253ead99ae1fb0da1014ce74f1667"
+  },
+  "testkit/run.sh": {
+    "mtime": 1794512005.8394465,
+    "seen": 1794512530.5067298,
+    "ast_hash": "8742ed001031f13985e933695e3a6f4e",
+    "semantic_hash": "8742ed001031f13985e933695e3a6f4e"
   }
 }

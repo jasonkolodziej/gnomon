@@ -17,5 +17,6 @@
 #   services/api      code-only
 #   docs              full
 
-# The Gnomon Rust workspace crates (local AST extraction, no API key needed).
-crates  code-only
+# The whole Gnomon repository: Rust crates, proto/, testkit/ (see .graphifyignore for what is
+# skipped). code-only = local AST extraction, no API key needed.
+.  code-only
