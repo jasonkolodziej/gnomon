@@ -1,7 +1,7 @@
 //! Reproducible evaluation of Gnomon's scheduling features on real HPC
 //! traces from the Parallel Workloads Archive (SWF).
 //!
-//! usage: experiments <dir-with-swf-traces> <out-dir> [jobs-per-window]
+//! usage: `experiments <dir-with-swf-traces> <out-dir> [jobs-per-window]`
 //!
 //! E0  exact replay: journal -> identical state; recovered history under the
 //!     same policy -> identical start times.

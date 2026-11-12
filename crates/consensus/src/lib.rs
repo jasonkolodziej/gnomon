@@ -1,7 +1,7 @@
 //! Phase 2: embedded Raft replication for the FSM (report section 4.1).
 //!
-//! `openraft` drives a replicated log of [`Event`]s; committed entries are
-//! applied to the [`Fsm`] in log order — exactly the `apply()` path the
+//! `openraft` drives a replicated log of [`Event`](gnomon_core::Event)s; committed entries are
+//! applied to the [`Fsm`](gnomon_fsm::Fsm) in log order — exactly the `apply()` path the
 //! single-node skeleton already used. Leader election replaces Slurm's
 //! passive backup controller.
 
