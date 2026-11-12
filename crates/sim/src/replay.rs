@@ -21,7 +21,7 @@ pub fn rebuild(journal: &[JournalEntry]) -> Fsm {
 }
 
 pub fn fingerprint(fsm: &Fsm) -> String {
-    fsm.read(|st| format!("{:?}|{:?}", st.jobs, st.graph))
+    fsm.read(|st| format!("{st:?}"))
 }
 
 /// True if replaying the journal reproduces exactly the original state.
@@ -70,9 +70,120 @@ pub fn to_jsonl(journal: &[JournalEntry]) -> String {
         .join("\n")
 }
 
-pub fn from_jsonl(s: &str) -> Vec<JournalEntry> {
+#[derive(Debug)]
+pub struct JsonlParseError {
+    pub line: usize,
+    pub source: serde_json::Error,
+}
+
+impl std::fmt::Display for JsonlParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid JSONL record on line {}: {}",
+            self.line, self.source
+        )
+    }
+}
+
+impl std::error::Error for JsonlParseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+pub fn from_jsonl(s: &str) -> Result<Vec<JournalEntry>, JsonlParseError> {
     s.lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).unwrap())
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(line, l)| {
+            serde_json::from_str(l).map_err(|source| JsonlParseError {
+                line: line + 1,
+                source,
+            })
+        })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gnomon_core::{Resources, Walltime};
+    use std::error::Error;
+    use std::time::Duration;
+
+    fn node_fsm() -> Fsm {
+        let fsm = Fsm::recording(Arc::new(ManualClock::new(100)));
+        fsm.apply(Event::NodeRegistered {
+            name: "node-0".into(),
+            capacity: Resources {
+                cores: 4,
+                mem_mb: 1024,
+                gpus: 1,
+            },
+        });
+        fsm
+    }
+
+    #[test]
+    fn fingerprint_includes_node_and_assignment_state() {
+        let idle = node_fsm();
+        let busy = node_fsm();
+        busy.apply(Event::Heartbeat {
+            name: "node-0".into(),
+            allocated: Resources {
+                cores: 1,
+                mem_mb: 0,
+                gpus: 0,
+            },
+        });
+        assert_ne!(fingerprint(&idle), fingerprint(&busy));
+
+        let make_assigned_fsm = || {
+            let fsm = node_fsm();
+            let job = gnomon_core::Job::new(
+                JobId(1),
+                "job",
+                "user",
+                Resources {
+                    cores: 1,
+                    mem_mb: 0,
+                    gpus: 0,
+                },
+                Walltime(Duration::from_secs(10)),
+            );
+            fsm.apply(Event::JobSubmitted(job));
+            fsm.apply(Event::JobStarted {
+                job: JobId(1),
+                vertices: vec![1],
+                start: 100,
+                dur: None,
+            });
+            fsm
+        };
+        let queued = make_assigned_fsm();
+        let fetched = make_assigned_fsm();
+        fetched.apply(Event::AssignmentsFetched {
+            node: "node-0".into(),
+            count: 1,
+        });
+        assert_ne!(fingerprint(&queued), fingerprint(&fetched));
+    }
+
+    #[test]
+    fn jsonl_parse_errors_report_original_line_number() {
+        let entry = JournalEntry {
+            at: 100,
+            event: Event::NodeRegistered {
+                name: "node-0".into(),
+                capacity: Resources::default(),
+            },
+        };
+        let jsonl = format!("{}\n \n{{", serde_json::to_string(&entry).unwrap());
+
+        let error = from_jsonl(&jsonl).unwrap_err();
+        assert_eq!(error.line, 3);
+        assert!(error.to_string().contains("line 3"));
+        assert!(error.source().is_some());
+    }
 }

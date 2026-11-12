@@ -27,7 +27,7 @@ tk_submit() {
   case $TK_BACKEND in
     gnomon)
       id=$(gnbatch --name "$name" --cpus "$cpus" --mem-mb 256 --time "$limit" \
-             "$JOB" "$test" "$tag" "$sleep_s" "$code" | awk '{print $NF}') ;;
+             "$JOB" "$test" "$tag" "$sleep_s" "$code" "$TK_OUT" | awk '{print $NF}') ;;
     slurm)
       local args=(--parsable -J "$name" -N 1 -n 1 -c "$cpus" --mem=256M -t "$(slurm_time "$limit")"
                   -p "${SLURM_PARTITION:-compute1}" -o "$TK_OUT/slurm-%j.out"
@@ -36,7 +36,7 @@ tk_submit() {
       [ -n "$pin" ] && [ -n "${SLURM_NODE:-}" ] && args+=(-w "$SLURM_NODE")
       # shellcheck disable=SC2206
       [ -n "${SLURM_EXTRA:-}" ] && args+=($SLURM_EXTRA)
-      id=$(sbatch "${args[@]}" "$JOB" "$test" "$tag" "$sleep_s" "$code" | cut -d';' -f1) ;;
+      id=$(sbatch "${args[@]}" "$JOB" "$test" "$tag" "$sleep_s" "$code" "$TK_OUT" | cut -d';' -f1) ;;
     *) die "TK_BACKEND must be gnomon or slurm" ;;
   esac
   [ -n "$id" ] || die "submit failed for $name"

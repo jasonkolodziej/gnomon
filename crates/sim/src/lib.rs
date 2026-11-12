@@ -306,7 +306,8 @@ mod tests {
         let sim = Simulator::new(Machine::single(32), Arc::new(BackfillPolicy::default()));
         let r = sim.run(&w);
         // 1. Exact replay of the journal (JSON round-trip included).
-        let journal = replay::from_jsonl(&replay::to_jsonl(&r.journal));
+        let journal = replay::from_jsonl(&replay::to_jsonl(&r.journal))
+            .expect("generated JSONL should parse");
         assert_eq!(journal, r.journal);
         let a = replay::rebuild(&journal);
         let b = replay::rebuild(&r.journal);

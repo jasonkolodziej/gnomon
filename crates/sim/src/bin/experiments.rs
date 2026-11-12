@@ -56,7 +56,7 @@ const CARBON: [f64; 24] = [
     340., 430., 520., 560., 550., 530., 510., 495.,
 ];
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let dir = args
         .get(1)
@@ -109,7 +109,7 @@ fn main() {
         let r = sim.run(&w);
         let sim_ms = t0.elapsed().as_millis();
         let jsonl = replay::to_jsonl(&r.journal);
-        let journal = replay::from_jsonl(&jsonl);
+        let journal = replay::from_jsonl(&jsonl)?;
         let t1 = Instant::now();
         let rebuilt = replay::rebuild(&journal);
         let replay_ms = t1.elapsed().as_millis();
@@ -334,4 +334,5 @@ fn main() {
         );
     }
     std::fs::write(format!("{out}/SUMMARY_raw.md"), md).unwrap();
+    Ok(())
 }
