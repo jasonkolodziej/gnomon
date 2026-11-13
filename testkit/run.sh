@@ -7,7 +7,7 @@
 # Results: out/<backend>-<timestamp>/{summary.tsv,metrics.tsv,*.rec}
 # Compare two runs: ./compare.py out/gnomon-... out/slurm-...
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 2
 TK_BACKEND=""; TESTS="t01 t02 t03 t04 t05 t06 t07"; BURST=50
 while [ $# -gt 0 ]; do
   case $1 in
@@ -20,7 +20,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 export TK_BACKEND
-# shellcheck source=lib.sh
+# shellcheck source-path=SCRIPTDIR source=lib.sh
 . ./lib.sh
 [ "$TK_BACKEND" = slurm ] && [ "${TK_SCALE:-1}" != 1 ] && die "--quick is for Gnomon only (Slurm limits are whole minutes)"
 

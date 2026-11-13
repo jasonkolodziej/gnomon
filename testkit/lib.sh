@@ -29,6 +29,7 @@ tk_submit() {
       id=$(gnbatch --name "$name" --cpus "$cpus" --mem-mb 256 --time "$limit" \
              "$JOB" "$test" "$tag" "$sleep_s" "$code" "$TK_OUT" | awk '{print $NF}') ;;
     slurm)
+      # shellcheck disable=SC2054  # --export=ALL,VAR=... is one Slurm argument, not two elements
       local args=(--parsable -J "$name" -N 1 -n 1 -c "$cpus" --mem=256M -t "$(slurm_time "$limit")"
                   -p "${SLURM_PARTITION:-compute1}" -o "$TK_OUT/slurm-%j.out"
                   --export=ALL,TESTKIT_OUT="$TK_OUT")
