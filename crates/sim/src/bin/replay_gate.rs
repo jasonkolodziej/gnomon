@@ -128,6 +128,20 @@ fn synthetic(seed: u64, n: u64, gap: u64, max_cores: u32) -> Vec<SimJob> {
         .collect()
 }
 
+/// Like [`synthetic`], but every `gang_every`-th job is an MPI-style gang of 2..=8 nodes (its
+/// `request` is per node), so gang matching, all-or-nothing commits and gang reservations are
+/// measured too.
+fn synthetic_gangs(seed: u64, n: u64, gap: u64, max_cores: u32, gang_every: u64) -> Vec<SimJob> {
+    let mut r = Rng(seed ^ 0x9e37_79b9_7f4a_7c15);
+    let mut jobs = synthetic(seed, n, gap, max_cores);
+    for (i, w) in jobs.iter_mut().enumerate() {
+        if (i as u64 + 1).is_multiple_of(gang_every) {
+            w.job.nodes = 2 + (r.next() % 7) as u32;
+        }
+    }
+    jobs
+}
+
 fn cluster(nodes: usize, cores: u32) -> Machine {
     Machine {
         nodes: (0..nodes)
@@ -157,6 +171,11 @@ fn scenarios(traces: Option<&str>, skipped: &mut Vec<String>) -> Result<Vec<Scen
             name: "synthetic/cluster-16x16".into(),
             machine: cluster(16, 16),
             workload: synthetic(7, 3000, 160, 16),
+        },
+        Scenario {
+            name: "synthetic/cluster-16x16-gangs".into(),
+            machine: cluster(16, 16),
+            workload: synthetic_gangs(11, 2000, 250, 16, 7),
         },
     ];
     let swf = [
@@ -460,6 +479,32 @@ mod tests {
     fn synthetic_workloads_are_deterministic() {
         assert_eq!(synthetic(42, 50, 90, 64), synthetic(42, 50, 90, 64));
         assert_ne!(synthetic(42, 50, 90, 64), synthetic(7, 50, 90, 64));
+    }
+
+    #[test]
+    fn gang_workload_marks_every_seventh_job() {
+        let w = synthetic_gangs(11, 70, 250, 16, 7);
+        let gangs: Vec<u32> = w.iter().map(|s| s.job.nodes).collect();
+        for (i, n) in gangs.iter().enumerate() {
+            if (i + 1).is_multiple_of(7) {
+                assert!((2..=8).contains(n), "job {i}: {n}");
+            } else {
+                assert_eq!(*n, 1);
+            }
+        }
+        assert_eq!(w, synthetic_gangs(11, 70, 250, 16, 7));
+    }
+
+    #[test]
+    fn small_gang_scenario_replays_exactly() {
+        let s = Scenario {
+            name: "g".into(),
+            machine: cluster(8, 8),
+            workload: synthetic_gangs(5, 140, 120, 8, 4),
+        };
+        let r = measure(&s).unwrap();
+        assert!(r.replay_exact && r.starts_identical);
+        assert_eq!((r.jobs, r.unplaced), (140, 0));
     }
 
     #[test]

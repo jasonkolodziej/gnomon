@@ -44,6 +44,17 @@
       "replay_exact": true,
       "starts_identical": true
     },
+    "synthetic/cluster-16x16-gangs": {
+      "jobs": 2000,
+      "mean_wait_h": 1.75248125,
+      "p95_wait_h": 6.251666666666667,
+      "mean_bsld": 3.793518841609295,
+      "wide_wait_h": 4.508022598870056,
+      "utilization": 0.7670890898688855,
+      "unplaced": 0,
+      "replay_exact": true,
+      "starts_identical": true
+    },
     "synthetic/single-128": {
       "jobs": 3000,
       "mean_wait_h": 3.173789351851852,
