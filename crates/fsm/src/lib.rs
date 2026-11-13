@@ -18,11 +18,14 @@ use gnomon_core::{
 use gnomon_graph::{ResourceGraph, VertexId, VertexKind};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 /// The committed state. Cloned (cheaply, at skeleton scale) into snapshots;
 /// a production version uses persistent/im-style data structures.
-#[derive(Clone, Debug, Default)]
+///
+/// Serializable so a durable store can persist a full state image (Raft
+/// snapshot / journal compaction) and [`Fsm::restore`] it on restart.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub jobs: BTreeMap<JobId, Job>,
     pub graph: ResourceGraph,
@@ -78,6 +81,15 @@ pub struct JournalEntry {
     pub event: Event,
 }
 
+/// Write-ahead hook: receives every event before it is applied, under the
+/// FSM's write lock, so records arrive in exact log order. A durable
+/// implementation (the controller's on-disk journal in `gnomon-consensus`)
+/// persists the record before returning; state never runs ahead of the log.
+pub trait EventSink: Send + Sync {
+    /// Record the event that will become state index `index`.
+    fn record(&self, index: StateIndex, entry: &JournalEntry);
+}
+
 /// Result of applying one event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Applied {
@@ -93,6 +105,7 @@ pub struct Fsm {
     index: AtomicU64,
     clock: Arc<dyn Clock>,
     journal: Option<Mutex<Vec<JournalEntry>>>,
+    sink: OnceLock<Arc<dyn EventSink>>,
 }
 
 impl Default for Fsm {
@@ -112,6 +125,7 @@ impl Fsm {
             index: AtomicU64::new(0),
             clock,
             journal: None,
+            sink: OnceLock::new(),
         }
     }
 
@@ -121,6 +135,22 @@ impl Fsm {
             journal: Some(Mutex::new(Vec::new())),
             ..Self::with_clock(clock)
         }
+    }
+
+    /// Attach a write-ahead [`EventSink`] (once; later calls are rejected
+    /// and return the sink back).
+    pub fn set_sink(&self, sink: Arc<dyn EventSink>) -> Result<(), Arc<dyn EventSink>> {
+        self.sink.set(sink)
+    }
+
+    /// Replace the whole state and index with a persisted image (Raft
+    /// snapshot install / restart recovery). The image is the exact state a
+    /// previous [`Fsm::snapshot`] captured, so a state fingerprint (the
+    /// `Debug` rendering of [`State`]) is preserved.
+    pub fn restore(&self, state: State, index: StateIndex) {
+        let mut st = self.state.write().unwrap();
+        *st = state;
+        self.index.store(index, Ordering::Release);
     }
 
     pub fn now(&self) -> u64 {
@@ -170,8 +200,26 @@ impl Fsm {
     /// Apply with the plan's per-vertex read set (leader-side fast path; the
     /// journaled event is identical, followers simply revalidate).
     pub fn apply_with_expect(&self, ev: Event, expect: &[(VertexId, u64)]) -> Applied {
-        let now = self.now();
+        self.apply_inner(ev, expect, None)
+    }
+
+    /// Apply one event as if the clock read `now`: the deterministic path
+    /// for replicated logs and recovery, where every replica (and every
+    /// restart) must see the timestamp the leader stamped, not its own clock.
+    pub fn apply_at(&self, ev: Event, now: u64) -> Applied {
+        self.apply_inner(ev, &[], Some(now))
+    }
+
+    fn apply_inner(&self, ev: Event, expect: &[(VertexId, u64)], at: Option<u64>) -> Applied {
+        let now = at.unwrap_or_else(|| self.now());
         let mut st = self.state.write().unwrap();
+        if let Some(sink) = self.sink.get() {
+            let entry = JournalEntry {
+                at: now,
+                event: ev.clone(),
+            };
+            sink.record(self.index() + 1, &entry);
+        }
         if let Some(j) = &self.journal {
             j.lock().unwrap().push(JournalEntry {
                 at: now,
@@ -454,5 +502,70 @@ mod tests {
         let a = fsm.read(|s| (s.jobs.clone(), format!("{:?}", s.graph)));
         let b = replica.read(|s| (s.jobs.clone(), format!("{:?}", s.graph)));
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn apply_at_ignores_the_local_clock() {
+        // Same event, applied at the stamped time by replicas whose clocks differ.
+        let make = |clock_now| {
+            let fsm = Fsm::with_clock(Arc::new(ManualClock::new(clock_now)));
+            fsm.apply_at(
+                Event::NodeRegistered {
+                    name: "n0".into(),
+                    capacity: Resources::default(),
+                },
+                1234,
+            );
+            fsm
+        };
+        let (a, b) = (make(1), make(999_999));
+        assert_eq!(a.read(|s| format!("{s:?}")), b.read(|s| format!("{s:?}")));
+        assert_eq!(a.snapshot().node("n0").unwrap().last_heartbeat, 1234);
+    }
+
+    #[test]
+    fn restore_reproduces_a_serialized_state_image() {
+        let (_c, fsm) = setup();
+        fsm.apply(Event::JobSubmitted(job(7, 1, 100)));
+        fsm.apply(Event::JobStarted {
+            job: JobId(7),
+            vertices: vec![1],
+            start: 1000,
+            dur: None,
+        });
+        let snap = fsm.snapshot();
+        let bytes = serde_json::to_vec(snap.state()).unwrap();
+        let other = Fsm::new();
+        other.restore(serde_json::from_slice(&bytes).unwrap(), snap.index);
+        assert_eq!(other.index(), fsm.index());
+        assert_eq!(
+            other.read(|s| format!("{s:?}")),
+            fsm.read(|s| format!("{s:?}"))
+        );
+        // next_job_id travels with the image.
+        assert_eq!(other.next_job_id(), JobId(8));
+    }
+
+    #[derive(Default)]
+    struct VecSink(Mutex<Vec<(StateIndex, JournalEntry)>>);
+    impl EventSink for VecSink {
+        fn record(&self, index: StateIndex, entry: &JournalEntry) {
+            self.0.lock().unwrap().push((index, entry.clone()));
+        }
+    }
+
+    #[test]
+    fn sink_sees_every_event_with_its_resulting_index() {
+        let (clock, fsm) = setup();
+        let sink = Arc::new(VecSink::default());
+        assert!(fsm.set_sink(sink.clone()).is_ok());
+        assert!(fsm.set_sink(sink.clone()).is_err());
+        clock.set(1500);
+        let i1 = fsm.apply(Event::JobSubmitted(job(1, 1, 10)));
+        let i2 = fsm.apply_at(Event::JobCancelled(JobId(1)), 1600).index;
+        let got = sink.0.lock().unwrap().clone();
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].0, got[0].1.at), (i1, 1500));
+        assert_eq!((got[1].0, got[1].1.at), (i2, 1600));
     }
 }

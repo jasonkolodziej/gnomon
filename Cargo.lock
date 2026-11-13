@@ -958,6 +958,7 @@ dependencies = [
  "gnomon-fsm",
  "openraft",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -974,6 +975,7 @@ name = "gnomon-ctl"
 version = "0.1.0"
 dependencies = [
  "gnomon-api",
+ "gnomon-consensus",
  "gnomon-core",
  "gnomon-fsm",
  "gnomon-policy",
@@ -989,6 +991,7 @@ dependencies = [
  "gnomon-core",
  "gnomon-graph",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
