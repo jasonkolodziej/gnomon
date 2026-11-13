@@ -44,6 +44,12 @@ tk_submit() {
   echo "$id"
 }
 
+# Job state from the controller's memory (finished jobs stay for MinJobAge). Used when there is
+# no accounting storage, e.g. the single-node Slurm of slurm-local.sh, where sacct has nothing.
+slurm_scontrol_state() {
+  scontrol show job -o "$1" 2>/dev/null | tr ' ' '\n' | awk -F= '$1=="JobState" {print $2; exit}'
+}
+
 # Normalised state: PENDING RUNNING COMPLETED FAILED CANCELLED UNKNOWN
 tk_state() {
   local id=$1 raw=""
@@ -51,7 +57,8 @@ tk_state() {
     gnomon) raw=$(gnqueue 2>/dev/null | awk -v id="$id" '$1==id {print $3}') ;;
     slurm)
       raw=$(squeue -h -j "$id" -o %T 2>/dev/null | head -1)
-      [ -z "$raw" ] && raw=$(sacct -n -X -P -j "$id" -o State 2>/dev/null | head -1 | awk '{print $1}') ;;
+      [ -z "$raw" ] && raw=$(sacct -n -X -P -j "$id" -o State 2>/dev/null | head -1 | awk '{print $1}')
+      [ -z "$raw" ] && raw=$(slurm_scontrol_state "$id") ;;
   esac
   case $raw in
     PENDING|RESERVED|CONFIGURING|REQUEUED) echo PENDING ;;
@@ -67,7 +74,8 @@ tk_state() {
 tk_raw_state() {
   case $TK_BACKEND in
     gnomon) gnqueue 2>/dev/null | awk -v id="$1" '$1==id {print $3}' ;;
-    slurm) { squeue -h -j "$1" -o %T 2>/dev/null; sacct -n -X -P -j "$1" -o State 2>/dev/null; } | head -1 | awk '{print $1}' ;;
+    slurm) { squeue -h -j "$1" -o %T 2>/dev/null; sacct -n -X -P -j "$1" -o State 2>/dev/null
+             slurm_scontrol_state "$1"; } | grep -v '^$' | head -1 | awk '{print $1}' ;;
   esac
 }
 
