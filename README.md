@@ -57,6 +57,10 @@ Evaluated on real Parallel Workloads Archive traces — full write-up in
 | **Exact replay + counterfactuals + shadow mode.** Journal → bit-identical state; recovered history re-scheduled under any policy with the production code; candidate policies run alongside the live one. | Tooling | 5,000-job trace: replay exact, same policy reproduces every start time |
 | **Distribution-aware backfill.** Spans planned at a learned runtime quantile (risk budget); overruns extended, walltime still the kill limit. | Opt-in | Oracle bound: −16% wait, −29% slowdown. Built-in predictor: inconsistent (median −3% wait at θ=0.7, range −15…+21%), so walltime stays default |
 | **Multi-node gang jobs.** `gnbatch -N 4` / `#SBATCH --nodes=4`: the per-node request is placed on N distinct nodes with one common start (all-or-nothing, oracle-tested `match_gang`), in both the start-now and reservation paths; agents get ranked assignments with the nodelist, and the FSM aggregates per-rank completions so replay stays exact. | On (`-N` defaults to 1) | Mixed 16-node simulation: no node oversubscribed, gang ranks start together, full-machine gang not starved under conservative backfill |
+| **Durable controller state + on-disk Raft storage.** `gnomon-ctl --state-dir DIR` journals every event to a checksummed, fsync'd write-ahead log and restores jobs, nodes and reservations on restart; `DiskStore` persists openraft's log, vote, commit point and snapshots with torn-tail recovery. | Opt-in (`--state-dir`) | Restart tests: identical state fingerprint after recovery; a real single-node openraft instance commits, restarts and resumes |
+| **cgroup v2 confinement + rootless containers.** Each job gets `cpu.max`/`memory.max` in its own cgroup (joined before `exec`, killed with `cgroup.kill`), or runs under rootless Docker/Podman with `--container IMAGE`; `GNOMON_NODELIST`/`GNOMON_NODE_RANK` for gangs. | On when cgroup2 is writable; containers per job | Tested against a fake cgroupfs and a fake `docker`; falls back to unconfined launches on cgroup v1 hosts |
+| **`gntop`.** Live Gantt TUI of every node's planner: running spans, backfill reservations, the pending queue. | Tool | Render-tested on ratatui's `TestBackend`; `--once` for CI and screenshots |
+| **Verification.** The seven-test kit runs against Gnomon on every PR and side by side with a single-node Slurm weekly; the *replay gate* fails any PR that worsens schedule quality or breaks exact replay; line coverage ≥ 80% enforced. | CI | Both schedulers pass 7/7 ([`results/testkit/COMPARISON.md`](results/testkit/COMPARISON.md)); coverage 58% → 86% |
 | **Time-varying capacity.** Per-node `CapacityProfile` (power caps, carbon windows) honoured natively by the planner. | Opt-in | Zero cap violations with 85% (power) / 67% (carbon) lower median wait than static derating; no job made unrunnable |
 
 Also: the planner's `earliest_fit` is now a single sweep (validated against a brute-force oracle),
@@ -237,7 +241,11 @@ ratatui's `TestBackend` with no network.
 7. [x] Per-vertex OCC, exact replay/shadow mode, distribution-aware planning (opt-in),
        time-varying capacity (opt-in); better runtime predictors and deferrable-job carbon
        policies next
-8. [x] `gntop` live Gantt view of the plan (polling `ListJobs`/`ListNodes`); next: push updates
+8. [x] Multi-node gang jobs (`-N`), all-or-nothing with a common start; per-rank completion — cancelling
+       peers on the first failed rank (needs an agent kill channel) next
+9. [x] Test kit side by side with Slurm (single-node, CI weekly), replay regression gate on every PR,
+       coverage floor — a multi-node Slurm cluster comparison next
+10. [x] `gntop` live Gantt view of the plan (polling `ListJobs`/`ListNodes`); next: push updates
        through index-aware blocking queries instead of polling, a per-job detail pane, partition
        and state filters, and drawing capacity profiles (power/carbon windows) as shaded
        background
