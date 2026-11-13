@@ -134,3 +134,75 @@ impl Trace {
         self.window(s, offset - s)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Header + six records: fields 1 id, 2 submit, 4 run, 5 alloc procs, 8 req procs,
+    // 9 req time, 12 user (18 fields per SWF line).
+    const TRACE: &str = "\
+; Version: 2.2
+; UnixStartTime: 86400
+; MaxNodes: 64
+; MaxProcs: 128
+1 100 5 600 16 -1 -1 16 1200 -1 1 7 -1 -1 -1 -1 -1 -1
+2 50 0 300 -1 -1 -1 8 600 -1 1 3 -1 -1 -1 -1 -1 -1
+3 200 0 0 4 -1 -1 4 600 -1 0 3 -1 -1 -1 -1 -1 -1
+4 300 0 900 256 -1 -1 256 1800 -1 1 3 -1 -1 -1 -1 -1 -1
+5 400 0 5000 8 -1 -1 -1 3600 -1 1 9 -1 -1 -1 -1 -1 -1
+6 500 0 700 2 -1 -1 2 600 -1 1 9 -1 -1 -1 -1 -1 -1
+short line
+";
+
+    #[test]
+    fn parses_header_and_filters_unusable_records() {
+        let t = parse("test", TRACE);
+        assert_eq!((t.max_procs, t.unix_start), (128, 86400));
+        // 3 has no runtime; 4 needs more processors than the machine; the bad line is ignored.
+        let ids: Vec<u64> = t.jobs.iter().map(|j| j.id).collect();
+        assert_eq!(ids, vec![2, 1, 5, 6], "sorted by submit time");
+        let j5 = t.jobs.iter().find(|j| j.id == 5).unwrap();
+        assert_eq!((j5.procs, j5.run, j5.req_time, j5.user), (8, 5000, 3600, 9));
+    }
+
+    #[test]
+    fn max_procs_falls_back_to_max_nodes_then_largest_job() {
+        let nodes_only = TRACE.replace("; MaxProcs: 128\n", "");
+        assert_eq!(parse("t", &nodes_only).max_procs, 64);
+        let bare: String = TRACE
+            .lines()
+            .filter(|l| !l.starts_with(';'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(parse("t", &bare).max_procs, 256);
+    }
+
+    #[test]
+    fn window_rebases_time_of_day_and_clips_runtime_to_walltime() {
+        let t = parse("test", TRACE);
+        let w = t.window(1, 3); // jobs 1, 5, 6
+        assert_eq!(w.len(), 3);
+        let ids: Vec<u64> = w.iter().map(|s| s.job.id.0).collect();
+        assert_eq!(ids, vec![1, 2, 3], "renumbered from 1");
+        // First job keeps its time of day: (86400 + 100) % 86400 = 100.
+        assert_eq!(w[0].job.submit_time, 100);
+        assert_eq!(w[1].job.submit_time, 100 + 300);
+        assert_eq!(
+            w[1].actual, 3600,
+            "run 5000 s clipped to the 3600 s request"
+        );
+        assert_eq!(w[1].job.user, "u9");
+        assert_eq!(w[1].job.request.cores, 8);
+        assert!(t.window(10, 5).is_empty());
+    }
+
+    #[test]
+    fn history_is_the_jobs_before_the_offset() {
+        let t = parse("test", TRACE);
+        let h = t.history(3, 2);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].job.request.cores, 16, "job 1");
+        assert_eq!(t.history(1, 5).len(), 1);
+    }
+}
