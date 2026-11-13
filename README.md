@@ -9,6 +9,8 @@
 # Gnomon
 
 [![Rust](https://github.com/jasonkolodziej/gnomon/actions/workflows/rust.yml/badge.svg)](https://github.com/jasonkolodziej/gnomon/actions/workflows/rust.yml)
+[![End-to-end](https://github.com/jasonkolodziej/gnomon/actions/workflows/e2e.yml/badge.svg)](https://github.com/jasonkolodziej/gnomon/actions/workflows/e2e.yml)
+[![Benchmarks](https://github.com/jasonkolodziej/gnomon/actions/workflows/bench.yml/badge.svg)](https://github.com/jasonkolodziej/gnomon/actions/workflows/bench.yml)
 [![Security Audit](https://github.com/jasonkolodziej/gnomon/actions/workflows/audit.yml/badge.svg)](https://github.com/jasonkolodziej/gnomon/actions/workflows/audit.yml)
 
 A Rust-native HPC scheduler. The name is the thesis, twice over:
@@ -107,6 +109,8 @@ exit codes) unchanged against Gnomon or a Slurm cluster and compares the two —
 | Workflow | Runs | Checks |
 |---|---|---|
 | [`rust.yml`](.github/workflows/rust.yml) | push to `main`, pull requests | `cargo fmt --check`, `cargo clippy -D warnings`, build + `cargo test`, `cargo doc` with `-D warnings` |
+| [`e2e.yml`](.github/workflows/e2e.yml) | push to `main`, pull requests; weekly + on demand | Test kit against a live controller and agents (quick); weekly, full length against Gnomon **and** a single-node Slurm with a side-by-side comparison; ShellCheck |
+| [`bench.yml`](.github/workflows/bench.yml) | push to `main`, pull requests | **Replay gate**: production scheduling path on synthetic workloads and real SWF traces, fails if schedule quality regresses vs [`results/replay_baseline.json`](results/replay_baseline.json) or replay is not exact; planner and OCC benchmarks published to the job summary |
 | [`audit.yml`](.github/workflows/audit.yml) | `Cargo.toml`/`Cargo.lock` changes, weekly | `cargo audit` against the RustSec advisory database |
 | [`ci.yml`](.github/workflows/ci.yml) | push to `main`, pull requests | YAML validation and secret-pattern scan |
 | [`graphify.yml`](.github/workflows/graphify.yml) | push to `main`, pull requests | Rebuilds the knowledge graph of the Rust crates and `testkit/` (see [GRAPHIFY.md](GRAPHIFY.md)) |
