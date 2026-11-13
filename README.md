@@ -1,4 +1,10 @@
-<p align="center"><img src="assets/logo/svg/gnomon-lockup-light.svg" alt="Gnomon" height="72"></p>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/svg/gnomon-lockup-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo/svg/gnomon-lockup-light.svg">
+    <img src="assets/logo/svg/gnomon-lockup-light.svg" alt="Gnomon" height="72">
+  </picture>
+</p>
 
 # Gnomon
 
