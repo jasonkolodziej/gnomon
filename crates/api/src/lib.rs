@@ -44,7 +44,11 @@ fn state_name(s: JobState) -> String {
     .into()
 }
 
-fn job_info(j: &Job) -> JobInfo {
+/// Wire view of a job. `planned_dur` falls back to the walltime when the
+/// scheduler has not chosen a shorter (predicted) span yet; `nodes` names
+/// the registered nodes whose planners hold the job's span (section 4.2), so
+/// clients can draw the plan per node.
+fn job_info(st: &gnomon_fsm::State, j: &Job) -> JobInfo {
     JobInfo {
         id: j.id.0,
         name: j.name.clone(),
@@ -60,8 +64,34 @@ fn job_info(j: &Job) -> JobInfo {
         priority: j.priority,
         submit_time: j.submit_time,
         planned_start: j.planned_start.unwrap_or(0),
-        nodes: vec![],
+        nodes: job_nodes(st, j.id),
+        planned_dur: j.planned_dur.unwrap_or_else(|| j.walltime.secs()),
     }
+}
+
+/// Names of the registered nodes carrying a planner span of `job`: each
+/// vertex holding the span is walked up to its nearest registered-node
+/// ancestor (a GPU leaf reports its host node).
+fn job_nodes(st: &gnomon_fsm::State, job: JobId) -> Vec<String> {
+    let g = &st.graph;
+    let mut names: Vec<String> = Vec::new();
+    for v in g
+        .vertices
+        .iter()
+        .filter(|v| v.planner.job_span(job.0).is_some())
+    {
+        let mut cur = Some(v);
+        while let Some(x) = cur {
+            if st.nodes.contains_key(&x.name) {
+                if !names.contains(&x.name) {
+                    names.push(x.name.clone());
+                }
+                break;
+            }
+            cur = x.parent.map(|p| g.vertex(p));
+        }
+    }
+    names
 }
 
 #[tonic::async_trait]
@@ -116,7 +146,7 @@ impl Scheduler for SchedulerSvc {
                     .job(JobId(r.job_id))
                     .ok_or_else(|| Status::not_found("no such job"))?;
                 return Ok(Response::new(GetJobReply {
-                    job: Some(job_info(job)),
+                    job: Some(job_info(snap.state(), job)),
                 }));
             }
             if std::time::Instant::now() > deadline {
@@ -138,7 +168,7 @@ impl Scheduler for SchedulerSvc {
             .values()
             .filter(|j| r.user.is_empty() || j.user == r.user)
             .filter(|j| r.state.is_empty() || state_name(j.state) == r.state)
-            .map(job_info)
+            .map(|j| job_info(snap.state(), j))
             .collect();
         Ok(Response::new(ListJobsReply {
             jobs,
@@ -272,5 +302,58 @@ impl Scheduler for SchedulerSvc {
             code: r.exit_code,
         });
         Ok(Response::new(ReportCompletionReply { ok: true }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gnomon_core::ManualClock;
+
+    fn fsm_with_node() -> Fsm {
+        let fsm = Fsm::with_clock(Arc::new(ManualClock::new(1000)));
+        fsm.apply(Event::NodeRegistered {
+            name: "n0".into(),
+            capacity: Resources {
+                cores: 4,
+                mem_mb: 0,
+                gpus: 0,
+            },
+        });
+        let req = Resources {
+            cores: 2,
+            mem_mb: 0,
+            gpus: 0,
+        };
+        let wall = Walltime(Duration::from_secs(600));
+        fsm.apply(Event::JobSubmitted(Job::new(JobId(1), "a", "u", req, wall)));
+        fsm.apply(Event::JobSubmitted(Job::new(JobId(2), "b", "u", req, wall)));
+        fsm
+    }
+
+    #[test]
+    fn job_info_reports_planned_span_and_nodes_once_placed() {
+        let fsm = fsm_with_node();
+        let n0 = fsm.read(|s| s.graph.by_name("n0")).unwrap();
+        fsm.apply(Event::JobStarted {
+            job: JobId(1),
+            vertices: vec![n0],
+            start: 1000,
+            dur: Some(120),
+        });
+        let info = fsm.read(|s| job_info(s, &s.jobs[&JobId(1)]));
+        assert_eq!(info.state, "RUNNING");
+        assert_eq!(info.planned_start, 1000);
+        assert_eq!(info.planned_dur, 120);
+        assert_eq!(info.nodes, vec!["n0".to_string()]);
+    }
+
+    #[test]
+    fn job_info_falls_back_to_walltime_and_no_nodes_while_pending() {
+        let fsm = fsm_with_node();
+        let info = fsm.read(|s| job_info(s, &s.jobs[&JobId(2)]));
+        assert_eq!(info.state, "PENDING");
+        assert_eq!(info.planned_dur, 600);
+        assert!(info.nodes.is_empty());
     }
 }

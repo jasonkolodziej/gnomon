@@ -35,6 +35,9 @@ message JobInfo {
   string state = 5; Resources request = 6; uint64 walltime_secs = 7;
   uint64 priority = 8; uint64 submit_time = 9; uint64 planned_start = 10;
   repeated string nodes = 11;
+  // Planned span length in seconds (runtime prediction or walltime), so
+  // clients such as gntop can draw [planned_start, planned_start + planned_dur).
+  uint64 planned_dur = 13;
 }
 
 message NodeInfo {
