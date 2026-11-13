@@ -19,6 +19,11 @@
 //! * [`QuantileEstimator`] — distribution-aware runtime planning with a
 //!   risk budget; [`ShadowPolicy`] — run a candidate policy alongside the
 //!   live one and record where they disagree.
+//! * [`BiasCorrectedEstimator`] — runtime prediction with online bias
+//!   correction under an asymmetric loss and wide-job protection.
+
+mod bias;
+pub use bias::{BiasConfig, BiasCorrectedEstimator, GuardMode};
 
 use gnomon_core::{Event, Job, JobId, JobState, StateIndex};
 use gnomon_fsm::{Fsm, Snapshot};
@@ -222,6 +227,11 @@ pub trait Policy: Send + Sync {
     /// Called when a job completes, so learning policies can update.
     fn observe(&self, _job: &Job, _actual_secs: u64) {}
 
+    /// Called once per [`backfill_pass`] with the queued (pending and
+    /// reserved) jobs, before the previous pass's reservations are cleared
+    /// and before any [`place`](Self::place) of this pass (default no-op).
+    fn begin_pass(&self, _queue: &[&Job], _graph: &ResourceGraph, _now: u64) {}
+
     /// For a running job that outlived its planned span: new span length.
     fn extend_secs(&self, job: &Job, elapsed: u64) -> u64 {
         job.walltime.secs().max(elapsed)
@@ -300,12 +310,56 @@ impl Policy for BackfillPolicy {
     }
 
     fn place(&self, graph: &ResourceGraph, job: &Job, now: u64, allow_reserve: bool) -> Decision {
-        let dur = self.planned_secs(job);
-        let dur_field = if self.estimator.is_some() {
-            Some(dur)
-        } else {
-            None
+        let Some(est) = &self.estimator else {
+            return self.place_span(graph, job, now, allow_reserve, job.walltime.secs(), None);
         };
+        let spans = est.spans_on(job, MachineShape::of(graph));
+        let plan = spans.plan;
+        let decision = self.place_span(graph, job, now, allow_reserve, plan, Some(plan));
+        if !matches!(decision, Decision::Start { .. }) {
+            return decision;
+        }
+        // Starts now at the predicted span. If it would not at the stricter
+        // guard span, the prediction squeezes it in front of a reservation:
+        // place it as the guard span allows (recording the prediction).
+        if spans.guard > plan {
+            match self.place_span(graph, job, now, allow_reserve, spans.guard, Some(plan)) {
+                Decision::Start { .. } => {}
+                guarded => return guarded,
+            }
+        }
+        // Record the more conservative span when it also starts now, so the
+        // reservations of later jobs do not rest on an optimistic span.
+        if spans.record > plan {
+            let rec = Some(spans.record);
+            if let d @ Decision::Start { .. } =
+                self.place_span(graph, job, now, allow_reserve, spans.record, rec)
+            {
+                return d;
+            }
+        }
+        decision
+    }
+
+    fn begin_pass(&self, queue: &[&Job], graph: &ResourceGraph, now: u64) {
+        if let Some(e) = &self.estimator {
+            e.begin_pass(queue, MachineShape::of(graph), now);
+        }
+    }
+}
+
+impl BackfillPolicy {
+    /// Earliest-fit placement of `job` for a span of `dur` seconds;
+    /// `dur_field` is the planned span recorded in the decision.
+    fn place_span(
+        &self,
+        graph: &ResourceGraph,
+        job: &Job,
+        now: u64,
+        allow_reserve: bool,
+        dur: u64,
+        dur_field: Option<u64>,
+    ) -> Decision {
         if !allow_reserve {
             // Cheap "start now?" check: skip vertices without free capacity now.
             for id in graph.leaves() {
@@ -411,10 +465,64 @@ impl PlanApplier {
 // Distribution-aware runtime planning.
 // ---------------------------------------------------------------------------
 
+/// Size of the machine a job is being placed on, derived from the resource
+/// graph so estimators can treat jobs relative to it (e.g. wide jobs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MachineShape {
+    /// Cores over all schedulable leaves.
+    pub total_cores: u32,
+    /// Cores of the largest single leaf (the widest single-vertex request).
+    pub largest_node_cores: u32,
+}
+
+impl MachineShape {
+    pub fn of(graph: &ResourceGraph) -> Self {
+        graph
+            .leaves()
+            .map(|id| graph.vertex(id).capacity.cores)
+            .fold(MachineShape::default(), |s, c| MachineShape {
+                total_cores: s.total_cores.saturating_add(c),
+                largest_node_cores: s.largest_node_cores.max(c),
+            })
+    }
+}
+
+/// The spans [`BackfillPolicy`] uses to place a job with an estimator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spans {
+    /// Predicted span: decides whether and when the job can run.
+    pub plan: u64,
+    /// A job that starts now at `plan` must also start now at `guard`, or it
+    /// is placed as the guard span allows (protects reservations it would
+    /// otherwise be squeezed in front of). `guard <= plan` disables it.
+    pub guard: u64,
+    /// Span recorded for a job that starts now, when it also fits now; later
+    /// jobs plan around it. `record <= plan` records `plan`.
+    pub record: u64,
+}
+
+impl Spans {
+    pub fn uniform(secs: u64) -> Self {
+        Spans {
+            plan: secs,
+            guard: secs,
+            record: secs,
+        }
+    }
+}
+
 /// Predicts how long a job will occupy its resources (never above walltime).
 pub trait RuntimeEstimator: Send + Sync + std::fmt::Debug {
     fn name(&self) -> String;
     fn planned_secs(&self, job: &Job) -> u64;
+    /// Spans for placing `job` on a machine of the given shape; defaults to
+    /// [`planned_secs`](Self::planned_secs) for all three.
+    fn spans_on(&self, job: &Job, _shape: MachineShape) -> Spans {
+        Spans::uniform(self.planned_secs(job))
+    }
+    /// Called once per scheduling pass with the queued jobs, as
+    /// [`Policy::begin_pass`] (default no-op).
+    fn begin_pass(&self, _queue: &[&Job], _shape: MachineShape, _now: u64) {}
     fn observe(&self, _job: &Job, _actual_secs: u64) {}
     /// New span length for a job that has run `elapsed` s past its plan.
     fn extend_secs(&self, job: &Job, elapsed: u64) -> u64 {
@@ -580,7 +688,16 @@ pub fn backfill_pass(
         stats.extended += 1;
     }
 
-    // 2. Re-plan: drop reservations (they are recomputed below).
+    // 2. Re-plan: show the policy the queue with last pass's reservations,
+    // then drop them (they are recomputed below).
+    fsm.read(|st| {
+        let queue: Vec<&Job> = st
+            .jobs
+            .values()
+            .filter(|j| matches!(j.state, JobState::Pending | JobState::Reserved))
+            .collect();
+        policy.begin_pass(&queue, &st.graph, now);
+    });
     let any_reserved = fsm.read(|st| st.jobs.values().any(|j| j.state == JobState::Reserved));
     if any_reserved {
         fsm.apply(Event::ReservationsCleared { now });
@@ -668,6 +785,10 @@ impl Policy for ShadowPolicy {
     fn observe(&self, job: &Job, a: u64) {
         self.primary.observe(job, a);
         self.candidate.observe(job, a);
+    }
+    fn begin_pass(&self, queue: &[&Job], graph: &ResourceGraph, now: u64) {
+        self.primary.begin_pass(queue, graph, now);
+        self.candidate.begin_pass(queue, graph, now);
     }
     fn extend_secs(&self, job: &Job, e: u64) -> u64 {
         self.primary.extend_secs(job, e)
@@ -899,6 +1020,157 @@ mod tests {
         assert!(
             matches!(diffs[0].candidate, Decision::Start { .. }),
             "candidate would backfill now"
+        );
+    }
+
+    /// Estimator with fixed spans, to test how `BackfillPolicy` uses them.
+    #[derive(Debug)]
+    struct FixedSpans(Spans);
+    impl RuntimeEstimator for FixedSpans {
+        fn name(&self) -> String {
+            "fixed".into()
+        }
+        fn planned_secs(&self, _job: &Job) -> u64 {
+            self.0.plan
+        }
+        fn spans_on(&self, _job: &Job, _shape: MachineShape) -> Spans {
+            self.0
+        }
+    }
+
+    /// One 4-core node, fully reserved from t = 1500 by job 9; job 1
+    /// (4 cores, walltime 10 000 s) is pending at t = 1000.
+    fn reserved_node() -> Fsm {
+        let fsm = Fsm::with_clock(Arc::new(gnomon_core::ManualClock::new(1000)));
+        fsm.apply(Event::NodeRegistered {
+            name: "n0".into(),
+            capacity: Resources {
+                cores: 4,
+                mem_mb: 0,
+                gpus: 0,
+            },
+        });
+        for id in [9, 1] {
+            fsm.apply(Event::JobSubmitted(Job::new(
+                JobId(id),
+                "a",
+                "bob",
+                Resources {
+                    cores: 4,
+                    mem_mb: 0,
+                    gpus: 0,
+                },
+                Walltime(Duration::from_secs(10_000)),
+            )));
+        }
+        assert!(
+            fsm.apply_checked(Event::JobReserved {
+                job: JobId(9),
+                vertices: vec![1],
+                start: 1500,
+                dur: None
+            })
+            .accepted
+        );
+        fsm
+    }
+
+    fn place_with(spans: Spans) -> Decision {
+        let fsm = reserved_node();
+        let pol = BackfillPolicy::with_estimator(48 * 3600, Arc::new(FixedSpans(spans)));
+        let snap = fsm.snapshot();
+        pol.place(snap.graph(), snap.job(JobId(1)).unwrap(), snap.now, true)
+    }
+
+    #[test]
+    fn machine_shape_reads_the_graph() {
+        let fsm = reserved_node();
+        fsm.apply(Event::NodeRegistered {
+            name: "n1".into(),
+            capacity: Resources {
+                cores: 16,
+                mem_mb: 0,
+                gpus: 0,
+            },
+        });
+        let shape = fsm.read(|st| MachineShape::of(&st.graph));
+        assert_eq!(
+            shape,
+            MachineShape {
+                total_cores: 20,
+                largest_node_cores: 16
+            }
+        );
+    }
+
+    #[test]
+    fn guard_span_blocks_backfill_in_front_of_a_reservation() {
+        let plain = Spans::uniform(100);
+        assert!(matches!(
+            place_with(plain),
+            Decision::Start {
+                start: 1000,
+                dur: Some(100),
+                ..
+            }
+        ));
+        // 100 s fits before the reservation at 1500, a 600 s guard does not:
+        // the job is not squeezed in, and keeps its predicted span.
+        let d = place_with(Spans {
+            guard: 600,
+            ..plain
+        });
+        assert!(
+            matches!(d, Decision::Reserve { dur: Some(100), .. }),
+            "{d:?}"
+        );
+        // A guard that also fits lets it start.
+        let d = place_with(Spans {
+            guard: 400,
+            ..plain
+        });
+        assert!(matches!(d, Decision::Start { dur: Some(100), .. }), "{d:?}");
+    }
+
+    #[test]
+    fn record_span_is_used_only_when_it_fits() {
+        let plain = Spans::uniform(100);
+        let d = place_with(Spans {
+            record: 400,
+            ..plain
+        });
+        assert!(matches!(d, Decision::Start { dur: Some(400), .. }), "{d:?}");
+        // Recording 800 s would overlap the reservation: keep the prediction.
+        let d = place_with(Spans {
+            record: 800,
+            ..plain
+        });
+        assert!(matches!(d, Decision::Start { dur: Some(100), .. }), "{d:?}");
+    }
+
+    #[test]
+    fn backfill_pass_shows_the_queue_before_clearing_reservations() {
+        #[derive(Default)]
+        struct Spy(Mutex<Vec<(JobId, JobState, Option<u64>)>>);
+        impl Policy for Spy {
+            fn place(&self, _: &ResourceGraph, _: &Job, _: u64, _: bool) -> Decision {
+                Decision::Defer
+            }
+            fn begin_pass(&self, queue: &[&Job], _: &ResourceGraph, _: u64) {
+                let mut seen = self.0.lock().unwrap();
+                seen.extend(queue.iter().map(|j| (j.id, j.state, j.planned_start)));
+                seen.sort_by_key(|x| x.0);
+            }
+        }
+        let fsm = reserved_node();
+        let spy = Spy::default();
+        backfill_pass(&fsm, &spy, &PlanApplier::new(), PassOptions::default());
+        assert_eq!(
+            *spy.0.lock().unwrap(),
+            vec![
+                (JobId(1), JobState::Pending, None),
+                (JobId(9), JobState::Reserved, Some(1500)),
+            ]
         );
     }
 }
