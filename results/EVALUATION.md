@@ -11,6 +11,7 @@ All numbers on this page are produced by code in this repository and can be rege
 | **Exact replay, counterfactuals and shadow mode** (`gnomon-sim`) | **Keep** | Tooling | Bit-identical replay; same policy reproduces all 5,000 start times; shadowing changes nothing live (§2, §5) |
 | **Distribution-aware backfill** (runtime quantiles + risk budget) | **Keep, opt-in** | Off | Mechanism is safe and the oracle shows 16% lower waits / 29% lower slowdown, but the built-in per-user predictor is inconsistent and slows wide jobs (§3) |
 | **Bias-corrected runtime prediction** (pinball-loss bias correction + reservation protection) | **Keep, opt-in** | Off | Lower mean wait in 9/9 windows (median −10%), −20% bounded slowdown, −13% p95 wait; median wide-job wait −3% but worse in 4/9 windows (up to +37%), so not a win on every criterion (§3b) |
+| **Multi-node gang jobs** (+ snapshot-cost fix) | **Keep** | On (`-N` defaults to 1) | Oracle-tested gang matching; default-policy schedules unchanged; controller throughput 0.92–0.96× of `main` after fixing a 0.55× regression (§7) |
 | **Time-varying capacity** (power caps, carbon windows) | **Keep, opt-in per node** | Off | Zero cap violations with 85% / 67% lower median wait than static derating, and no job made unrunnable (§4) |
 
 Everything stays. Runtime predictors ship off by default. The per-user quantile predictor (§3) is
@@ -247,6 +248,67 @@ baseline got 1.5–9.7× faster and the parallel core 1.0–3.8× faster. As a r
 the parallel path on small bursts (≤1,024 jobs), where the parallel path's snapshot copy and thread
 start-up dominate sub-millisecond runs; the parallel core still wins by 1.5–1.6× at 4,096–8,192 jobs.
 
+## 7. Future-work iteration: gangs, durability, runtime confinement, verification
+
+Measured on a 4-vCPU cloud VM (not the 2-core sandbox of §1–§6), after integrating every item.
+Raw data: `bench-2026-11/`, `replay_baseline.json`, `testkit/`.
+
+**Schedules are unchanged where they should be.** The replay gate (`replay_gate`) gives identical
+metrics before and after gangs, durable state, the agent runtime and `gntop` for the default policy,
+on two synthetic machines and the three SWF windows, with exact replay everywhere. Re-running
+`experiments` reproduces `e1_runtime_quantiles.csv`, `e1b_bias_corrected.csv` and
+`e2_capacity_profiles.csv` exactly (E0 journals grow ~1% from the new `nodes`/`container` fields).
+
+**A throughput regression, caught by the benchmarks and fixed.** Gang support first cut
+controller-path throughput (`occ_bench`, summed over all 18 rows) to **0.55×** of `main`: every
+placement copied the job's node names into a per-job map and into each rank's assignment, and the
+FSM deep-clones state for every scheduling evaluation. Sharing one `Arc<[String]>` per job still
+left ~20%: concurrent snapshot threads contended on the atomic reference counts (`Job` clone/drop
+rose from 2% to 21% of the profile). The fix records a placed job's rank-0 vertex as a plain integer
+and keeps a shared node list only for gangs, so single-node jobs add no heap or atomic work per
+snapshot. Interleaved A/B runs against `main` on the same host: **0.92–0.96×**, within run-to-run
+noise. CI now runs this A/B on every pull request and fails below 0.85×
+(`.github/scripts/occ_ab.py`).
+
+Per-vertex OCC on this host (`bench-2026-11/occ_conflicts.csv`):
+
+| workers | heartbeats/s | conflicts GlobalIndex → PerVertex | jobs/s GlobalIndex → PerVertex | speedup |
+|---|---|---|---|---|
+| 1 | 0 | 0 → 0 | 1,776 → 1,903 | 1.07× |
+| 2 | 0 | 1,078 → 0 | 1,927 → 2,749 | 1.43× |
+| 4 | 0 | 1,059 → 24 | 3,507 → 4,285 | 1.22× |
+| 1 | 100 | 34 → 0 | 1,775 → 1,781 | 1.00× |
+| 2 | 100 | 1,011 → 7 | 1,994 → 2,813 | 1.41× |
+| 4 | 100 | 828 → 12 | 3,501 → 4,121 | 1.18× |
+| 1 | 1000 | 613 → 0 | 1,431 → 1,758 | 1.23× |
+| 2 | 1000 | 991 → 3 | 1,916 → 2,783 | 1.45× |
+| 4 | 1000 | 1,130 → 20 | 3,391 → 4,708 | 1.39× |
+
+The §1 conclusion holds: 97–100% fewer conflicts and up to 1.45× throughput; single-worker runs
+without heartbeats are roughly a wash, as expected (nothing to conflict with). Planning core
+(`bench-2026-11/bench_results.csv`): the parallel path wins at 4,096–8,192 jobs (1.4×) and the serial
+loop at ≤1,024, as in §6.
+
+**Gang jobs in the replay gate.** `synthetic/cluster-16x16-gangs` (16 × 16-core nodes, every 7th of
+2,000 jobs a 2–8 node gang, ~77% utilization): mean wait 1.75 h, wide-job wait 4.5 h, exact replay;
+it is now part of the committed baseline, so a change that slows gangs fails CI.
+
+**Gnomon vs Slurm, same host.** The seven-test kit at full length against Gnomon and a single-node
+Slurm 23.11 (`testkit/slurm-local.sh`): both pass 7/7. Backfill behaves identically (the short job
+is backfilled ~235 s ahead of the wide one, the long job held behind it); on a 50-job burst Gnomon
+submits at 120 vs 43 jobs/s and drains in 27 vs 37 s. Details and caveats:
+[`testkit/COMPARISON.md`](testkit/COMPARISON.md). A one-node Slurm is not a production cluster;
+multi-node placement and scale remain to be compared on real hardware.
+
+| Future-work item | Status | Evidence |
+|---|---|---|
+| Bias-correcting runtime predictor protecting wide jobs | Built, opt-in | §3b: −10% mean wait (9/9 windows), wide jobs still worse in 4/9 |
+| Persistent Raft · cgroup confinement | Built | Durable `DiskStore` + controller `--state-dir` with restart tests; cgroup v2 limits tested on a fake cgroupfs (this host is cgroup v1) |
+| Multi-node gang jobs | Built, on | Oracle-tested `match_gang`; mixed 16-node simulation; replay gate scenario |
+| Rootless containers · live Gantt TUI (`gntop`) | Built | Docker/Podman argv and kill tested with a fake runtime; `gntop` render tests + live `--once` |
+| Same test suite side by side with Slurm | Single-node Slurm, CI weekly | 7/7 on both; a multi-node cluster comparison is still open |
+| Every change measured with the replay harness | CI gate on every PR | Replay gate + throughput A/B + 80% coverage floor |
+
 ## Limitations
 
 - Simulation, not a cluster: SWF traces record processor counts, so the machine is one vertex with
@@ -263,6 +325,8 @@ cargo run --release -p gnomon-sim --bin experiments -- <dir-with-swf> results 50
 cargo run --release -p gnomon-sim --bin experiments -- <dir-with-swf> results 5000 --only e1   # E1/§3b alone
 cargo run --release -p gnomon-sched --bin occ_bench > results/occ_conflicts.csv
 cargo run --release -p gnomon-sched --bin bench > bench_results.csv
+cargo run --release -p gnomon-sim --bin replay_gate -- --traces <dir-with-swf>   # §7 gate
+python3 .github/scripts/occ_ab.py <base occ_bench> <new occ_bench>               # §7 A/B
 ```
 
 Raw data: `e1_runtime_quantiles.csv`, `e1b_bias_corrected.csv` (§3b subset of E1), `e2_capacity_profiles.csv`, `occ_conflicts.csv`,
