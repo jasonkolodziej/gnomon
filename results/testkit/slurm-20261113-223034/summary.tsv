@@ -1,0 +1,7 @@
+t01	PASS	job 3 completed; wait 1s
+t02	PASS	job sees cpus=4 (nproc=4; equals 4 only with cgroup confinement)
+t03	PASS	C backfilled 234s before wide B; D waited for B (+31s)
+t04	PASS	queued job 10 cancelled, never ran
+t05	PASS	50 jobs; submit 42.7 jobs/s; drained in 37s
+t06	PASS	killed at limit (state TIMEOUT)
+t07	PASS	exit 3 -> FAILED
