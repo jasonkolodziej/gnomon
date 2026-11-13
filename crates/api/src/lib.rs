@@ -45,7 +45,9 @@ fn state_name(s: JobState) -> String {
 }
 
 /// Wire view of a job. `nodes` lists every node the job holds (all ranks
-/// of a gang, in rank order) once it has been placed.
+/// of a gang, in rank order) once it has been placed; `planned_dur` falls
+/// back to the walltime when the scheduler has not chosen a shorter
+/// (predicted) span yet, so clients such as gntop can draw the plan.
 fn job_info(j: &Job, nodes: Option<&Vec<String>>) -> JobInfo {
     JobInfo {
         id: j.id.0,
@@ -64,6 +66,7 @@ fn job_info(j: &Job, nodes: Option<&Vec<String>>) -> JobInfo {
         planned_start: j.planned_start.unwrap_or(0),
         nodes: nodes.cloned().unwrap_or_default(),
         num_nodes: j.node_count(),
+        planned_dur: j.planned_dur.unwrap_or_else(|| j.walltime.secs()),
         container: j.container.clone().unwrap_or_default(),
     }
 }
@@ -559,5 +562,58 @@ mod container_tests {
         let s = svc();
         let id = submit_id(&s, "").await;
         assert_eq!(s.fsm.snapshot().job(JobId(id)).unwrap().container, None);
+    }
+}
+
+#[cfg(test)]
+mod job_info_tests {
+    use super::*;
+    use gnomon_core::ManualClock;
+
+    fn fsm_with_node() -> Fsm {
+        let fsm = Fsm::with_clock(Arc::new(ManualClock::new(1000)));
+        fsm.apply(Event::NodeRegistered {
+            name: "n0".into(),
+            capacity: Resources {
+                cores: 4,
+                mem_mb: 0,
+                gpus: 0,
+            },
+        });
+        let req = Resources {
+            cores: 2,
+            mem_mb: 0,
+            gpus: 0,
+        };
+        let wall = Walltime(Duration::from_secs(600));
+        fsm.apply(Event::JobSubmitted(Job::new(JobId(1), "a", "u", req, wall)));
+        fsm.apply(Event::JobSubmitted(Job::new(JobId(2), "b", "u", req, wall)));
+        fsm
+    }
+
+    #[test]
+    fn job_info_reports_planned_span_and_nodes_once_placed() {
+        let fsm = fsm_with_node();
+        let n0 = fsm.read(|s| s.graph.by_name("n0")).unwrap();
+        fsm.apply(Event::JobStarted {
+            job: JobId(1),
+            vertices: vec![n0],
+            start: 1000,
+            dur: Some(120),
+        });
+        let info = fsm.read(|s| job_info(&s.jobs[&JobId(1)], s.allocations.get(&JobId(1))));
+        assert_eq!(info.state, "RUNNING");
+        assert_eq!(info.planned_start, 1000);
+        assert_eq!(info.planned_dur, 120);
+        assert_eq!(info.nodes, vec!["n0".to_string()]);
+    }
+
+    #[test]
+    fn job_info_falls_back_to_walltime_and_no_nodes_while_pending() {
+        let fsm = fsm_with_node();
+        let info = fsm.read(|s| job_info(&s.jobs[&JobId(2)], s.allocations.get(&JobId(2))));
+        assert_eq!(info.state, "PENDING");
+        assert_eq!(info.planned_dur, 600);
+        assert!(info.nodes.is_empty());
     }
 }

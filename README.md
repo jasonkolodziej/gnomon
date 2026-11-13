@@ -24,7 +24,7 @@ A Rust-native HPC scheduler. The name is the thesis, twice over:
   scheduler).
 
 Pronounced *NO-mon*. CLI shims use the `gn` prefix: `gnbatch`, `gnqueue`,
-`gncancel`, `gninfo`.
+`gncancel`, `gninfo`, plus `gntop`, a live Gantt view of the plan.
 
 A research codebase implementing the Rust-native HPC scheduler architecture
 proposed in [`docs/SLURM_Scheduler_Research_and_Rust_Design.md`](docs/SLURM_Scheduler_Research_and_Rust_Design.md).
@@ -43,6 +43,7 @@ proposed in [`docs/SLURM_Scheduler_Research_and_Rust_Design.md`](docs/SLURM_Sche
 | `gnomon-ctl` | Controller daemon (gRPC server + background scheduler loop); `--state-dir` / `GNOMON_STATE_DIR` makes it restart-safe | 4.6 |
 | `gnomon-agent` | Node agent: real /proc + GPU probing, registration, heartbeats, job launch in cgroup v2 or rootless containers | 4.6 |
 | `gnomon-cli` | **Slurm-compatible shims**: `gnbatch` (parses #SBATCH), `gnqueue`, `gncancel`, `gninfo` | 4.5 |
+| `gnomon-top` | **`gntop`**: `top`-like live Gantt chart of the cluster plan (running spans + backfill reservations per node) | 4.2, 5.2 |
 | `gnomon-sim` | **Exact replay**, counterfactual policy evaluation on recorded history, SWF trace simulator, metrics | 6.3 |
 
 ## What's new in this iteration
@@ -126,6 +127,7 @@ GNOMON_NODE=node0 gnomon-agent & # registers real hardware, heartbeats, executes
 gnbatch --name train -c 8 --gpus 2 -t 3600 train.sh arg1     # parses #SBATCH too; flags win
 gnbatch -N 4 -c 16 -t 3600 mpi.sh # gang: 16 CPUs on each of 4 nodes, same start
 gnqueue; gninfo; gncancel 3
+gntop                            # live Gantt chart of the plan (q quits)
 ```
 
 ## Node agent runtime: cgroups and containers
@@ -184,6 +186,41 @@ Under rootless Docker, container root maps to the agent's user, while `--user <u
 subordinate uid, so files the job writes to the bind mount belong to that subuid. Use Podman with
 `--userns=keep-id` (automatic here) when output ownership matters.
 
+### `gntop`: the time axis, live
+
+Gnomon schedules on the time axis (each vertex's planner holds running spans and future backfill
+reservations), and `gntop` draws it. It polls `ListJobs` and `ListNodes`, then shows one row per
+node with its capacity, allocation and liveness in a left gutter. Running spans are solid (`█`) and
+reservations are hatched (`░`); both are labelled `<id> <name>`, and overlapping spans on one node
+stack onto extra lanes. A red `│` cursor marks *now*. Planned jobs whose nodes are unknown go to a
+`pending` lane. Below the chart is the pending queue (priority, wait time). The header shows the
+counts per state and the API state index. If the controller goes away, the header says
+`disconnected, retrying`, the last plan stays on screen marked stale, and polling reconnects by
+itself.
+
+| Key | Action |
+|---|---|
+| `q`, `Esc`, `Ctrl-C` | quit (the terminal is restored, also on panic) |
+| `p` | pause / resume polling |
+| `+` / `-` | zoom in / out (halve / double the window) |
+| `←` / `→` (`h` / `l`) | pan a quarter window earlier / later |
+| `0` | reset zoom and pan |
+| `/` | filter by user (Enter applies, empty shows all, Esc cancels) |
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--addr URL` | `$GNOMON_ADDR` or `http://127.0.0.1:7631` | controller |
+| `--interval D` | `1s` | poll interval (`500ms`, `5s`, ...) |
+| `--history D` / `--horizon D` | `10m` / `2h` | window before / after now |
+| `-u, --user NAME` | all | initial user filter |
+| `--once` | off | print one plain-text frame to stdout (no alternate screen, no colours) and exit; the exit status is non-zero when the controller is unreachable, for CI smoke tests and screenshots |
+| `--width N` / `--height N` | terminal size, else 120×40 | frame size for `--once` |
+
+`gntop` lives in its own crate (`crates/top`), not in `gnomon-cli`. That keeps the ratatui/crossterm
+dependency tree out of the Slurm shims, and its library target lets the pure layout code (time→column
+mapping, lane stacking, zoom/pan state machine) and the full-screen render be unit-tested against
+ratatui's `TestBackend` with no network.
+
 ## Roadmap status (report section 4.6)
 
 1. [x] FSM + graph + optimistic scheduler skeleton
@@ -200,3 +237,7 @@ subordinate uid, so files the job writes to the bind mount belong to that subuid
 7. [x] Per-vertex OCC, exact replay/shadow mode, distribution-aware planning (opt-in),
        time-varying capacity (opt-in); better runtime predictors and deferrable-job carbon
        policies next
+8. [x] `gntop` live Gantt view of the plan (polling `ListJobs`/`ListNodes`); next: push updates
+       through index-aware blocking queries instead of polling, a per-job detail pane, partition
+       and state filters, and drawing capacity profiles (power/carbon windows) as shaded
+       background

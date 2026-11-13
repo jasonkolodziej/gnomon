@@ -37,9 +37,12 @@ message JobInfo {
   string state = 5; Resources request = 6; uint64 walltime_secs = 7;
   uint64 priority = 8; uint64 submit_time = 9; uint64 planned_start = 10;
   repeated string nodes = 11;
-  string container = 14;
   // Gang size (Slurm NODES). Named num_nodes because field 11 is already `nodes`.
   uint32 num_nodes = 12;
+  // Planned span length in seconds (runtime prediction or walltime), so
+  // clients such as gntop can draw [planned_start, planned_start + planned_dur).
+  uint64 planned_dur = 13;
+  string container = 14;
 }
 
 message NodeInfo {
