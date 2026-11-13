@@ -252,7 +252,9 @@ fn set_profiles(fsm: &Fsm, p: CapacityProfile) {
 mod tests {
     use super::*;
     use gnomon_core::Walltime;
-    use gnomon_sched::{BackfillPolicy, QuantileEstimator};
+    use gnomon_sched::{
+        BackfillPolicy, BiasConfig, BiasCorrectedEstimator, GuardMode, QuantileEstimator,
+    };
     use std::time::Duration;
 
     /// Small deterministic synthetic workload with heavy walltime overestimation.
@@ -377,6 +379,47 @@ mod tests {
         for (_, d) in ev {
             used += d;
             assert!(used <= 32, "oversubscribed: {used}");
+        }
+    }
+
+    #[test]
+    fn bias_corrected_never_oversubscribes_even_when_badly_wrong() {
+        // Warm-started on a lie (every job ran 1 s) and planning at a low
+        // level: nearly every job overruns. Both guard modes, with slip
+        // protection and wide jobs (>= 8 of 32 cores) in the mix.
+        let w = workload(300);
+        for guard_mode in [GuardMode::Block, GuardMode::Record] {
+            let est = Arc::new(BiasCorrectedEstimator::new(BiasConfig {
+                tau: 0.1,
+                guard_tau: Some(0.2),
+                guard_mode,
+                ..BiasConfig::default()
+            }));
+            for s in &w {
+                est.observe(&s.job, 1);
+            }
+            let r = Simulator::new(
+                Machine::single(32),
+                Arc::new(BackfillPolicy::with_estimator(48 * 3600, est)),
+            )
+            .run(&w);
+            assert_eq!(r.outcomes.len(), 300, "{guard_mode:?}");
+            assert_eq!(r.unplaced, 0);
+            assert!(r.extensions > 0);
+            let mut ev: Vec<(u64, i64)> = r
+                .outcomes
+                .iter()
+                .flat_map(|o| [(o.start, o.cores as i64), (o.end, -(o.cores as i64))])
+                .collect();
+            ev.sort();
+            let mut used = 0;
+            for (_, d) in ev {
+                used += d;
+                assert!(used <= 32, "oversubscribed: {used} ({guard_mode:?})");
+            }
+            for (o, s) in r.outcomes.iter().zip(w.iter()) {
+                assert_eq!(o.end - o.start, s.actual, "never killed early");
+            }
         }
     }
 
