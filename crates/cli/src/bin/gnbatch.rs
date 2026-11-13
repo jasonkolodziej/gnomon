@@ -127,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
             walltime_secs: time.max(1),
             priority: 1000,
             command,
+            nodes: 1,
         })
         .await?
         .into_inner();
