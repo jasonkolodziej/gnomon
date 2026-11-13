@@ -81,7 +81,9 @@ fn bench_serial(fsm: &Fsm) -> (u64, Duration) {
     let mut events = Vec::new();
     for job in &jobs {
         let dur = job.walltime.0.as_secs();
-        if let Some((verts, start)) = graph.match_request(&job.request, now, dur, job.id.0) {
+        if let Some((verts, start)) =
+            graph.match_gang(&job.request, job.node_count(), now, dur, job.id.0)
+        {
             if graph.commit(&verts, &job.request, start, dur) {
                 events.push(Event::JobStarted {
                     job: job.id,
@@ -151,7 +153,9 @@ fn bench_parallel(fsm: &Fsm, policy: Arc<dyn Policy>, workers: usize) -> (u64, D
             let mut evs = Vec::new();
             for j in &pending {
                 let dur = j.walltime.0.as_secs();
-                if let Some((verts, start)) = graph.match_request(&j.request, now, dur, j.id.0) {
+                if let Some((verts, start)) =
+                    graph.match_gang(&j.request, j.node_count(), now, dur, j.id.0)
+                {
                     if graph.commit(&verts, &j.request, start, dur) {
                         evs.push(Event::JobStarted {
                             job: j.id,
