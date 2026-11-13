@@ -61,6 +61,7 @@ fn job_info(j: &Job) -> JobInfo {
         submit_time: j.submit_time,
         planned_start: j.planned_start.unwrap_or(0),
         nodes: vec![],
+        container: j.container.clone().unwrap_or_default(),
     }
 }
 
@@ -91,6 +92,7 @@ impl Scheduler for SchedulerSvc {
         };
         job.priority = r.priority;
         job.command = r.command;
+        job.container = Some(r.container).filter(|c| !c.is_empty());
         self.fsm.apply(Event::JobSubmitted(job.clone()));
         self.broker.enqueue(&job, self.fsm.index());
         Ok(Response::new(SubmitJobReply { job_id: id.0 }))
@@ -249,6 +251,11 @@ impl Scheduler for SchedulerSvc {
                     }),
                     walltime_secs: j.walltime.secs(),
                     name: j.name.clone(),
+                    container: j.container.clone().unwrap_or_default(),
+                    // Gang placement fills these; the agent defaults an
+                    // empty nodelist to its own node, rank 0.
+                    nodelist: vec![],
+                    rank: 0,
                 })
             })
             .collect();
@@ -272,5 +279,98 @@ impl Scheduler for SchedulerSvc {
             code: r.exit_code,
         });
         Ok(Response::new(ReportCompletionReply { ok: true }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn svc() -> SchedulerSvc {
+        SchedulerSvc {
+            fsm: Arc::new(Fsm::new()),
+            broker: Arc::new(EvalBroker::new()),
+        }
+    }
+
+    fn submit(container: &str) -> SubmitJobRequest {
+        SubmitJobRequest {
+            name: "c".into(),
+            user: "u".into(),
+            partition: String::new(),
+            request: Some(pb::Resources {
+                cores: 1,
+                mem_mb: 0,
+                gpus: 0,
+            }),
+            walltime_secs: 60,
+            priority: 1,
+            command: "true".into(),
+            container: container.into(),
+        }
+    }
+
+    async fn submit_id(s: &SchedulerSvc, container: &str) -> u64 {
+        s.submit_job(Request::new(submit(container)))
+            .await
+            .unwrap()
+            .into_inner()
+            .job_id
+    }
+
+    #[tokio::test]
+    async fn container_image_flows_from_submit_to_job_info_and_fetch_work() {
+        let s = svc();
+        let id = submit_id(&s, "alpine:3.20").await;
+        assert_eq!(
+            s.fsm
+                .snapshot()
+                .job(JobId(id))
+                .unwrap()
+                .container
+                .as_deref(),
+            Some("alpine:3.20")
+        );
+        let jobs = s
+            .list_jobs(Request::new(ListJobsRequest::default()))
+            .await
+            .unwrap()
+            .into_inner()
+            .jobs;
+        assert_eq!(jobs[0].container, "alpine:3.20");
+
+        s.register_node(Request::new(RegisterNodeRequest {
+            name: "n0".into(),
+            capacity: Some(pb::Resources {
+                cores: 4,
+                mem_mb: 1024,
+                gpus: 0,
+            }),
+        }))
+        .await
+        .unwrap();
+        let vertex = s.fsm.read(|st| st.graph.by_name("n0").unwrap());
+        s.fsm.apply(Event::JobStarted {
+            job: JobId(id),
+            vertices: vec![vertex],
+            start: gnomon_core::now_secs(),
+            dur: None,
+        });
+        let work = s
+            .fetch_work(Request::new(FetchWorkRequest { node: "n0".into() }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(work.assignments.len(), 1);
+        assert_eq!(work.assignments[0].container, "alpine:3.20");
+        assert!(work.assignments[0].nodelist.is_empty());
+        assert_eq!(work.assignments[0].rank, 0);
+    }
+
+    #[tokio::test]
+    async fn empty_container_means_none() {
+        let s = svc();
+        let id = submit_id(&s, "").await;
+        assert_eq!(s.fsm.snapshot().job(JobId(id)).unwrap().container, None);
     }
 }

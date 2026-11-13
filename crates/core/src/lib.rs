@@ -152,6 +152,10 @@ pub struct Job {
     pub planned_dur: Option<u64>,
     /// Command line the agent executes (phase 4: real launches).
     pub command: String,
+    /// Container image the agent runs the command in (rootless Docker or
+    /// Podman); `None` runs it directly on the node under a cgroup.
+    #[serde(default)]
+    pub container: Option<String>,
 }
 
 impl Job {
@@ -169,6 +173,7 @@ impl Job {
             planned_start: None,
             planned_dur: None,
             command: String::new(),
+            container: None,
         }
     }
 }
