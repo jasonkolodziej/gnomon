@@ -1145,7 +1145,7 @@ mod tests {
         assert_eq!(stats.started, 1);
         fsm.read(|st| {
             assert_eq!(st.jobs[&JobId(1)].state, JobState::Running);
-            assert_eq!(st.allocations[&JobId(1)].len(), 4);
+            assert_eq!(st.job_nodes(&st.jobs[&JobId(1)]).len(), 4);
             assert_eq!(st.assignments.len(), 4);
         });
     }

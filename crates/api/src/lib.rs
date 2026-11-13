@@ -48,7 +48,7 @@ fn state_name(s: JobState) -> String {
 /// of a gang, in rank order) once it has been placed; `planned_dur` falls
 /// back to the walltime when the scheduler has not chosen a shorter
 /// (predicted) span yet, so clients such as gntop can draw the plan.
-fn job_info(j: &Job, nodes: Option<&Vec<String>>) -> JobInfo {
+fn job_info(j: &Job, nodes: Vec<String>) -> JobInfo {
     JobInfo {
         id: j.id.0,
         name: j.name.clone(),
@@ -64,7 +64,7 @@ fn job_info(j: &Job, nodes: Option<&Vec<String>>) -> JobInfo {
         priority: j.priority,
         submit_time: j.submit_time,
         planned_start: j.planned_start.unwrap_or(0),
-        nodes: nodes.cloned().unwrap_or_default(),
+        nodes,
         num_nodes: j.node_count(),
         planned_dur: j.planned_dur.unwrap_or_else(|| j.walltime.secs()),
         container: j.container.clone().unwrap_or_default(),
@@ -124,7 +124,7 @@ impl Scheduler for SchedulerSvc {
                 let job = snap
                     .job(JobId(r.job_id))
                     .ok_or_else(|| Status::not_found("no such job"))?;
-                let nodes = snap.state().allocations.get(&job.id);
+                let nodes = snap.state().job_nodes(job);
                 return Ok(Response::new(GetJobReply {
                     job: Some(job_info(job, nodes)),
                 }));
@@ -148,7 +148,7 @@ impl Scheduler for SchedulerSvc {
             .values()
             .filter(|j| r.user.is_empty() || j.user == r.user)
             .filter(|j| r.state.is_empty() || state_name(j.state) == r.state)
-            .map(|j| job_info(j, snap.state().allocations.get(&j.id)))
+            .map(|j| job_info(j, snap.state().job_nodes(j)))
             .collect();
         Ok(Response::new(ListJobsReply {
             jobs,
@@ -260,7 +260,7 @@ impl Scheduler for SchedulerSvc {
                     walltime_secs: j.walltime.secs(),
                     name: j.name.clone(),
                     container: j.container.clone().unwrap_or_default(),
-                    nodelist: a.nodelist.clone(),
+                    nodelist: snap.state().job_nodes(j),
                     rank: a.rank,
                 })
             })
@@ -601,7 +601,7 @@ mod job_info_tests {
             start: 1000,
             dur: Some(120),
         });
-        let info = fsm.read(|s| job_info(&s.jobs[&JobId(1)], s.allocations.get(&JobId(1))));
+        let info = fsm.read(|s| job_info(&s.jobs[&JobId(1)], s.job_nodes(&s.jobs[&JobId(1)])));
         assert_eq!(info.state, "RUNNING");
         assert_eq!(info.planned_start, 1000);
         assert_eq!(info.planned_dur, 120);
@@ -611,7 +611,7 @@ mod job_info_tests {
     #[test]
     fn job_info_falls_back_to_walltime_and_no_nodes_while_pending() {
         let fsm = fsm_with_node();
-        let info = fsm.read(|s| job_info(&s.jobs[&JobId(2)], s.allocations.get(&JobId(2))));
+        let info = fsm.read(|s| job_info(&s.jobs[&JobId(2)], s.job_nodes(&s.jobs[&JobId(2)])));
         assert_eq!(info.state, "PENDING");
         assert_eq!(info.planned_dur, 600);
         assert!(info.nodes.is_empty());

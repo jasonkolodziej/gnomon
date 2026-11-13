@@ -576,10 +576,14 @@ impl ResourceGraph {
         job: Option<u64>,
         expect: &[(VertexId, u64)],
     ) -> bool {
-        // A vertex listed twice would be checked once but booked twice.
-        let mut seen = vertices.to_vec();
-        seen.sort_unstable();
-        if seen.windows(2).any(|w| w[0] == w[1]) {
+        // A vertex listed twice would be checked once but booked twice. Gangs
+        // are a handful of vertices, and this runs under the FSM write lock:
+        // an allocation-free pairwise check beats sorting a copy.
+        if vertices
+            .iter()
+            .enumerate()
+            .any(|(i, v)| vertices[i + 1..].contains(v))
+        {
             return false;
         }
         let fast = !expect.is_empty()

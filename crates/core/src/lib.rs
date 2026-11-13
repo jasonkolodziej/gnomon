@@ -162,6 +162,18 @@ pub struct Job {
     /// [`Job::node_count`]).
     #[serde(default = "one")]
     pub nodes: u32,
+    /// Graph vertex of rank 0 once placed (the only vertex of a single-node
+    /// job). Set by the FSM, kept after completion for listings, cleared when
+    /// a reservation is dropped or the job is cancelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placed_on: Option<u32>,
+    /// A placed *gang's* nodes in rank order (rank `i` runs on
+    /// `allocation[i]`); `None` for single-node jobs, which need only
+    /// `placed_on`. The FSM clones every job into each snapshot, so per-job
+    /// heap or reference-counted data is kept to gangs. Neither field is
+    /// serialized while empty, so submitted jobs journal exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocation: Option<NodeList>,
 }
 
 fn one() -> u32 {
@@ -185,6 +197,8 @@ impl Job {
             command: String::new(),
             container: None,
             nodes: 1,
+            placed_on: None,
+            allocation: None,
         }
     }
 
@@ -335,6 +349,12 @@ pub struct NodeInfo {
     pub last_heartbeat: u64,
 }
 
+/// The nodes of one placed job, in rank order. Shared (`Arc`) between the
+/// job's allocation and each rank's assignment: the FSM snapshot clones the
+/// whole state for every scheduling evaluation, so this must be a reference
+/// count bump, not a fresh `Vec<String>` per copy. Serializes as a list.
+pub type NodeList = std::sync::Arc<[String]>;
+
 /// Per-node work assignment handed to agents via FetchWork.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Assignment {
@@ -342,12 +362,11 @@ pub struct Assignment {
     pub command: String,
     pub start: u64,
     /// Rank of this node within the job (0 for single-node jobs); ranks follow
-    /// the order of the job's placement vertices.
+    /// the order of the job's placement vertices. The job's full node list
+    /// (Slurm's `SLURM_JOB_NODELIST`) is kept once per job in the FSM's
+    /// allocations, not copied into every rank's assignment.
     #[serde(default)]
     pub rank: u32,
-    /// Every node of the job in rank order (Slurm's `SLURM_JOB_NODELIST`).
-    #[serde(default)]
-    pub nodelist: Vec<String>,
 }
 
 #[cfg(test)]
@@ -390,6 +409,5 @@ mod tests {
     fn assignment_rank_fields_default_for_old_records() {
         let a: Assignment = serde_json::from_str(r#"{"job":3,"command":"x","start":5}"#).unwrap();
         assert_eq!(a.rank, 0);
-        assert!(a.nodelist.is_empty());
     }
 }

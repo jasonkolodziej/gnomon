@@ -562,13 +562,15 @@ mod tests {
             ) = (accepted, &e.event)
             {
                 assert!(placed.insert(*job, (vertices.clone(), *start)).is_none());
-                // Every rank's assignment carries the same start and nodelist.
+                // Every rank's assignment carries the same start; the job's
+                // allocation names all n nodes.
                 let ranks: Vec<(u32, u64, usize)> = fsm.read(|st| {
+                    let n = st.job_nodes(&st.jobs[job]).len();
                     st.assignments
                         .values()
                         .flatten()
                         .filter(|a| a.job == *job)
-                        .map(|a| (a.rank, a.start, a.nodelist.len()))
+                        .map(|a| (a.rank, a.start, n))
                         .collect()
                 });
                 let n = nodes_of[job] as usize;

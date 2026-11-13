@@ -33,10 +33,6 @@ pub struct State {
     pub nodes: BTreeMap<String, NodeInfo>,
     /// Work queued per node for FetchWork (phase 4).
     pub assignments: BTreeMap<String, Vec<Assignment>>,
-    /// Node names each placed job holds, in rank order (rank `i` runs on
-    /// `allocations[job][i]`). Kept after completion for job listings;
-    /// dropped when a reservation is cleared or cancelled.
-    pub allocations: BTreeMap<JobId, Vec<String>>,
     /// Per-rank exit reports of running gang jobs, `rank -> (end, code)`,
     /// aggregated into the job's completion once every rank has reported.
     pub rank_reports: BTreeMap<JobId, BTreeMap<u32, (u64, i32)>>,
@@ -46,6 +42,20 @@ pub struct State {
 impl State {
     pub fn pending_jobs(&self) -> impl Iterator<Item = &Job> {
         self.jobs.values().filter(|j| j.state == JobState::Pending)
+    }
+
+    /// Names of the nodes `job` holds, in rank order (empty until placed).
+    pub fn job_nodes(&self, job: &Job) -> Vec<String> {
+        match (&job.allocation, job.placed_on) {
+            (Some(gang), _) => gang.to_vec(),
+            (None, Some(v)) => self
+                .graph
+                .vertices
+                .get(v as usize)
+                .map(|vx| vec![vx.name.clone()])
+                .unwrap_or_default(),
+            (None, None) => Vec::new(),
+        }
     }
 }
 
@@ -280,29 +290,32 @@ fn place(
     };
     j.planned_start = Some(start);
     j.planned_dur = Some(d);
-    let cmd = j.command.clone();
-    let nodelist: Vec<String> = vertices
-        .iter()
-        .filter_map(|&v| st.graph.vertices.get(v as usize))
-        .map(|vx| vx.name.clone())
-        .collect();
+    j.placed_on = vertices.first().copied();
+    j.allocation = (vertices.len() > 1).then(|| {
+        vertices
+            .iter()
+            .filter_map(|&v| st.graph.vertices.get(v as usize))
+            .map(|vx| vx.name.clone())
+            .collect()
+    });
     if running {
         // Phase 4: enqueue executable work for the owning agents, one
         // assignment per node, ranked in vertex order.
-        for (rank, node) in nodelist.iter().enumerate() {
-            st.assignments
-                .entry(node.clone())
-                .or_default()
-                .push(Assignment {
-                    job,
-                    command: cmd.clone(),
-                    start,
-                    rank: rank as u32,
-                    nodelist: nodelist.clone(),
-                });
+        let cmd = j.command.clone();
+        for (rank, &v) in vertices.iter().enumerate() {
+            if let Some(vx) = st.graph.vertices.get(v as usize) {
+                st.assignments
+                    .entry(vx.name.clone())
+                    .or_default()
+                    .push(Assignment {
+                        job,
+                        command: cmd.clone(),
+                        start,
+                        rank: rank as u32,
+                    });
+            }
         }
     }
-    st.allocations.insert(job, nodelist);
     true
 }
 
@@ -318,9 +331,11 @@ fn rank_finished(st: &mut State, job: JobId, node: &str, end: u64, code: i32) ->
     if st.jobs.get(&job).map(|j| j.state) != Some(JobState::Running) {
         return false;
     }
-    let Some(alloc) = st.allocations.get(&job) else {
-        return false;
-    };
+    let alloc = st
+        .jobs
+        .get(&job)
+        .map(|j| st.job_nodes(j))
+        .unwrap_or_default();
     let Some(rank) = alloc.iter().position(|n| n == node) else {
         return false;
     };
@@ -358,6 +373,8 @@ fn apply_event(st: &mut State, ev: &Event, expect: &[(VertexId, u64)], now: u64)
             let mut job = job.clone();
             st.next_job_id = st.next_job_id.max(job.id.0 + 1);
             job.state = JobState::Pending;
+            job.placed_on = None;
+            job.allocation = None;
             st.jobs.insert(job.id, job);
         }
         Event::JobCancelled(id) => {
@@ -365,7 +382,8 @@ fn apply_event(st: &mut State, ev: &Event, expect: &[(VertexId, u64)], now: u64)
                 if matches!(j.state, JobState::Pending | JobState::Reserved) {
                     j.state = JobState::Cancelled;
                     st.graph.release_job(id.0, 0);
-                    st.allocations.remove(id);
+                    j.placed_on = None;
+                    j.allocation = None;
                 }
             }
         }
@@ -409,8 +427,9 @@ fn apply_event(st: &mut State, ev: &Event, expect: &[(VertexId, u64)], now: u64)
                 .collect();
             for id in reserved {
                 st.graph.release_job(id.0, 0);
-                st.allocations.remove(&id);
                 let j = st.jobs.get_mut(&id).unwrap();
+                j.placed_on = None;
+                j.allocation = None;
                 j.state = JobState::Pending;
                 j.planned_start = None;
                 j.planned_dur = None;
@@ -684,12 +703,11 @@ mod tests {
         assert!(fsm.apply_checked(start(1, vec![2, 3, 4])).accepted);
         fsm.read(|s| {
             let list = vec!["n1".to_string(), "n2".into(), "n3".into()];
-            assert_eq!(s.allocations[&JobId(1)], list);
+            assert_eq!(s.job_nodes(&s.jobs[&JobId(1)]), list);
             for (rank, node) in list.iter().enumerate() {
                 let q = &s.assignments[node];
                 assert_eq!(q.len(), 1);
                 assert_eq!(q[0].rank, rank as u32);
-                assert_eq!(q[0].nodelist, list);
                 assert_eq!(q[0].command, "mpirun app");
                 assert_eq!(q[0].start, 1000);
             }
@@ -714,7 +732,7 @@ mod tests {
         fsm.read(|s| {
             assert!(s.graph.vertex(1).planner.job_span(1).is_none());
             assert!(s.graph.vertex(2).planner.job_span(1).is_none());
-            assert!(!s.allocations.contains_key(&JobId(1)));
+            assert!(s.job_nodes(&s.jobs[&JobId(1)]).is_empty());
         });
         assert!(fsm.apply_checked(start(1, vec![1, 2, 4])).accepted);
     }
@@ -740,7 +758,11 @@ mod tests {
                 // Released at the latest rank's end.
                 assert_eq!(s.graph.vertex(v).planner.job_span(1), Some((1000, 1070)));
             }
-            assert_eq!(s.allocations[&JobId(1)].len(), 3, "kept for listings");
+            assert_eq!(
+                s.job_nodes(&s.jobs[&JobId(1)]).len(),
+                3,
+                "kept for listings"
+            );
         });
         // Reports after completion have no effect.
         assert!(!fsm.apply_checked(rank_done("n0", 1080, 0)).accepted);
@@ -813,11 +835,11 @@ mod tests {
             .accepted
         );
         fsm.read(|s| {
-            assert_eq!(s.allocations[&JobId(1)].len(), 2);
+            assert_eq!(s.job_nodes(&s.jobs[&JobId(1)]).len(), 2);
             assert!(s.assignments.is_empty(), "no work before the gang starts");
         });
         fsm.apply(Event::ReservationsCleared { now: 1000 });
-        fsm.read(|s| assert!(s.allocations.is_empty()));
+        fsm.read(|s| assert!(s.jobs.values().all(|j| s.job_nodes(j).is_empty())));
         fsm.apply(Event::JobReserved {
             job: JobId(1),
             vertices: vec![3, 4],
@@ -826,7 +848,7 @@ mod tests {
         });
         fsm.apply(Event::JobCancelled(JobId(1)));
         fsm.read(|s| {
-            assert!(s.allocations.is_empty());
+            assert!(s.jobs.values().all(|j| s.job_nodes(j).is_empty()));
             assert!(s.graph.vertex(3).planner.job_span(1).is_none());
         });
     }
