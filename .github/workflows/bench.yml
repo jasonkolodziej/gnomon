@@ -108,3 +108,36 @@ jobs:
           path: |
             bench_results.csv
             occ_conflicts.csv
+
+  throughput-ab:
+    name: Controller throughput vs base
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+          save-if: false
+
+      - name: Build occ_bench for the PR and its base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          cargo build --release --locked -p gnomon-sched --bin occ_bench
+          cp target/release/occ_bench occ_bench.pr
+          git worktree add --detach base "$BASE_SHA"
+          (cd base && cargo build --release --locked -p gnomon-sched --bin occ_bench --target-dir ../target)
+          cp target/release/occ_bench occ_bench.base
+
+      # Interleaved runs on one runner; fails if the PR's median falls below 85% of the base.
+      - name: A/B controller-path throughput
+        run: python3 .github/scripts/occ_ab.py ./occ_bench.base ./occ_bench.pr --runs 3 --summary "$GITHUB_STEP_SUMMARY"
