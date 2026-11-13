@@ -22,6 +22,9 @@ struct Args {
     time: Option<u64>,
     #[arg(long, short = 'p')]
     partition: Option<String>,
+    /// Container image to run the job in (rootless Docker/Podman on the node).
+    #[arg(long, alias = "container-image", value_name = "IMAGE")]
+    container: Option<String>,
     #[arg(default_value = "")]
     script: String,
     /// Arguments passed to the script (like `sbatch script arg1 arg2`).
@@ -48,49 +51,90 @@ fn parse_mem_mb(v: &str) -> Option<u64> {
     })
 }
 
+/// Job settings gathered from `#SBATCH`/`#GNOMON` directives, starting from
+/// gnbatch's defaults.
+#[derive(Debug, Clone, PartialEq)]
+struct Directives {
+    name: Option<String>,
+    cores: u32,
+    mem_mb: u64,
+    gpus: u32,
+    time: u64,
+    partition: String,
+    container: Option<String>,
+}
+
+impl Default for Directives {
+    fn default() -> Self {
+        Directives {
+            name: None,
+            cores: 1,
+            mem_mb: 1024,
+            gpus: 0,
+            time: 600,
+            partition: "normal".into(),
+            container: None,
+        }
+    }
+}
+
+/// Parse the directive lines of a batch script body. Unknown directives
+/// (output, nodes, ntasks...) are accepted and ignored.
+fn parse_directives(body: &str) -> Directives {
+    let mut d = Directives::default();
+    for line in body.lines() {
+        let Some(l) = line
+            .strip_prefix("#SBATCH")
+            .or_else(|| line.strip_prefix("#GNOMON"))
+        else {
+            continue;
+        };
+        for tok in l.split_whitespace() {
+            let (k, v) = tok.split_once('=').unwrap_or((tok, ""));
+            match k {
+                "--cpus-per-task" => d.cores = v.parse().unwrap_or(d.cores),
+                "--mem" => d.mem_mb = parse_mem_mb(v).unwrap_or(d.mem_mb),
+                "--gpus" => d.gpus = v.parse().unwrap_or(d.gpus),
+                "--gres" => {
+                    if let Some(n) = v.strip_prefix("gpu:").and_then(|n| n.rsplit(':').next()) {
+                        d.gpus = n.parse().unwrap_or(d.gpus)
+                    }
+                }
+                "--time" => d.time = parse_slurm_time(v).unwrap_or(d.time),
+                "--job-name" => d.name = Some(v.to_string()),
+                "--partition" => d.partition = v.to_string(),
+                // `--container-image` is the pyxis/enroot spelling Slurm users know.
+                "--container" | "--container-image" if !v.is_empty() => {
+                    d.container = Some(v.to_string())
+                }
+                _ => {}
+            }
+        }
+    }
+    d
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let a = Args::parse();
     // Directives first, then explicit flags win.
-    let (mut name, mut cores, mut mem, mut gpus, mut time, mut part) = (
-        None::<String>,
-        1u32,
-        1024u64,
-        0u32,
-        600u64,
-        "normal".to_string(),
-    );
-    if !a.script.is_empty() {
-        if let Ok(body) = std::fs::read_to_string(&a.script) {
-            for line in body.lines() {
-                let Some(l) = line
-                    .strip_prefix("#SBATCH")
-                    .or_else(|| line.strip_prefix("#GNOMON"))
-                else {
-                    continue;
-                };
-                for tok in l.split_whitespace() {
-                    let (k, v) = tok.split_once('=').unwrap_or((tok, ""));
-                    match k {
-                        "--cpus-per-task" => cores = v.parse().unwrap_or(cores),
-                        "--mem" => mem = parse_mem_mb(v).unwrap_or(mem),
-                        "--gpus" => gpus = v.parse().unwrap_or(gpus),
-                        "--gres" => {
-                            if let Some(n) =
-                                v.strip_prefix("gpu:").and_then(|n| n.rsplit(':').next())
-                            {
-                                gpus = n.parse().unwrap_or(gpus)
-                            }
-                        }
-                        "--time" => time = parse_slurm_time(v).unwrap_or(time),
-                        "--job-name" => name = Some(v.to_string()),
-                        "--partition" => part = v.to_string(),
-                        _ => {} // other directives (output, nodes, ntasks...) are accepted and ignored
-                    }
-                }
-            }
-        }
-    }
+    let d = if a.script.is_empty() {
+        Directives::default()
+    } else {
+        std::fs::read_to_string(&a.script)
+            .map(|body| parse_directives(&body))
+            .unwrap_or_default()
+    };
+    let Directives {
+        name,
+        cores,
+        mem_mb: mem,
+        gpus,
+        time,
+        partition: part,
+        container,
+    } = d;
+    let container = a.container.or(container).unwrap_or_default();
     let name = a.name.or(name).unwrap_or_else(|| "job".into());
     let (cores, mem, gpus, time, part) = (
         a.cpus.unwrap_or(cores),
@@ -127,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
             walltime_secs: time.max(1),
             priority: 1000,
             command,
+            container,
         })
         .await?
         .into_inner();
@@ -145,4 +190,62 @@ fn parse_slurm_time(s: &str) -> Option<u64> {
         [d, h, m, s2] => d * 86400 + h * 3600 + m * 60 + s2,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_without_directives() {
+        assert_eq!(
+            parse_directives("#!/bin/sh\necho hi\n"),
+            Directives::default()
+        );
+    }
+
+    #[test]
+    fn parses_resource_directives() {
+        let d = parse_directives(
+            "#!/bin/sh\n#SBATCH --cpus-per-task=4 --mem=2G\n#GNOMON --gres=gpu:a100:2\n\
+             #SBATCH --time=1:30:00\n#SBATCH --job-name=train --partition=gpu\n",
+        );
+        assert_eq!(d.cores, 4);
+        assert_eq!(d.mem_mb, 2048);
+        assert_eq!(d.gpus, 2);
+        assert_eq!(d.time, 5400);
+        assert_eq!(d.name.as_deref(), Some("train"));
+        assert_eq!(d.partition, "gpu");
+        assert_eq!(d.container, None);
+    }
+
+    #[test]
+    fn parses_container_directive_both_spellings() {
+        let d = parse_directives("#SBATCH --container=alpine:3.20\n");
+        assert_eq!(d.container.as_deref(), Some("alpine:3.20"));
+        let d = parse_directives("#SBATCH --container-image=nvcr.io/nvidia/pytorch:24.05-py3\n");
+        assert_eq!(
+            d.container.as_deref(),
+            Some("nvcr.io/nvidia/pytorch:24.05-py3")
+        );
+        assert_eq!(parse_directives("#SBATCH --container=\n").container, None);
+    }
+
+    #[test]
+    fn container_flag_accepts_both_spellings() {
+        let a = Args::try_parse_from(["gnbatch", "--container", "alpine", "job.sh"]).unwrap();
+        assert_eq!(a.container.as_deref(), Some("alpine"));
+        let a = Args::try_parse_from(["gnbatch", "--container-image=alpine", "job.sh"]).unwrap();
+        assert_eq!(a.container.as_deref(), Some("alpine"));
+        assert_eq!(a.script, "job.sh");
+    }
+
+    #[test]
+    fn slurm_time_and_mem_units() {
+        assert_eq!(parse_slurm_time("10"), Some(600));
+        assert_eq!(parse_slurm_time("1-02:00:00"), Some(93600));
+        assert_eq!(parse_mem_mb("512K"), Some(1));
+        assert_eq!(parse_mem_mb("3T"), Some(3 * 1024 * 1024));
+        assert_eq!(parse_mem_mb("x"), None);
+    }
 }

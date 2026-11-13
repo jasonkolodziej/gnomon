@@ -1,12 +1,15 @@
 //! gnomon-agent: per-node agent (slurmd equivalent), phase 4.
 //!
 //! Registers with the controller over gRPC, heartbeats every 10 s, polls
-//! for work assignments, and launches job commands as child processes
-//! (cgroup confinement and CDI device injection are the next iteration;
-//! resource detection is real: /proc + nvidia-smi/rocm-smi probing).
+//! for work assignments, and launches jobs through [`gnomon_agent::Launcher`]:
+//! confined in a per-job cgroup v2 when available, or inside a rootless
+//! container when the job names an image (CDI device injection is the next
+//! iteration; resource detection is real: /proc + nvidia-smi/rocm-smi probing).
 
+use gnomon_agent::{LaunchSpec, Launcher};
 use gnomon_api::pb::scheduler_client::SchedulerClient;
 use gnomon_api::pb::*;
+use std::sync::Arc;
 use std::time::Duration;
 
 fn detect() -> Resources {
@@ -54,6 +57,13 @@ async fn main() -> anyhow::Result<()> {
     let name = std::env::var("GNOMON_NODE").unwrap_or_else(|_| hostname::fallback());
     let addr = std::env::var("GNOMON_ADDR").unwrap_or_else(|_| "http://127.0.0.1:7631".into());
     let cap = detect();
+    // Probed once: cgroup availability is logged here, not per job.
+    let launcher = Arc::new(Launcher::from_env());
+    // Jobs run (and containers bind-mount) the agent's working directory
+    // unless GNOMON_WORKDIR names another, e.g. a shared filesystem.
+    let workdir = std::env::var_os("GNOMON_WORKDIR")
+        .map(std::path::PathBuf::from)
+        .map_or_else(std::env::current_dir, Ok)?;
     println!(
         "gnomon-agent '{name}': {} cores, {} MiB, {} GPUs",
         cap.cores, cap.mem_mb, cap.gpus
@@ -84,51 +94,24 @@ async fn main() -> anyhow::Result<()> {
             .into_inner();
         for a in work.assignments {
             let (mut client, node) = (client.clone(), name.clone());
+            let spec = LaunchSpec::from_assignment(&a, &name, workdir.clone());
+            let launcher = Arc::clone(&launcher);
             tokio::spawn(async move {
-                // Run the job like slurmd: job environment, walltime enforced
-                // (SIGKILL at the limit, reported as exit 124 like timeout(1)).
-                let req = a.request.unwrap_or_default();
-                let code = tokio::task::spawn_blocking(move || {
-                    let child = std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&a.command)
-                        .env("GNOMON_JOB_ID", a.job_id.to_string())
-                        .env("GNOMON_JOB_NAME", &a.name)
-                        .env("GNOMON_CPUS", req.cores.to_string())
-                        .env("GNOMON_MEM_MB", req.mem_mb.to_string())
-                        .env("GNOMON_GPUS", req.gpus.to_string())
-                        .env("GNOMON_TIME_LIMIT", a.walltime_secs.to_string())
-                        .spawn();
-                    let mut child = match child {
-                        Ok(c) => c,
-                        Err(_) => return -1,
-                    };
-                    let limit = if a.walltime_secs > 0 {
-                        Some(std::time::Instant::now() + Duration::from_secs(a.walltime_secs))
-                    } else {
-                        None
-                    };
-                    loop {
-                        match child.try_wait() {
-                            Ok(Some(st)) => return st.code().unwrap_or(-1),
-                            Ok(None) => {}
-                            Err(_) => return -1,
-                        }
-                        if limit.is_some_and(|l| std::time::Instant::now() >= l) {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            return 124;
-                        }
-                        std::thread::sleep(Duration::from_millis(200));
-                    }
-                })
-                .await
-                .unwrap_or(-1);
-                println!("job {} finished: exit {code}", a.job_id);
+                // Run the job like slurmd: job environment, limits, walltime
+                // enforced (killed at the limit, reported as exit 124).
+                let job_id = spec.job_id;
+                let out = tokio::task::spawn_blocking(move || launcher.run(&spec))
+                    .await
+                    .ok();
+                let code = out.map_or(-1, |o| o.exit_code);
+                match out.and_then(|o| o.usage) {
+                    Some(u) => println!("job {job_id} finished: exit {code} ({u})"),
+                    None => println!("job {job_id} finished: exit {code}"),
+                }
                 let _ = client
                     .report_completion(ReportCompletionRequest {
                         node,
-                        job_id: a.job_id,
+                        job_id,
                         exit_code: code,
                     })
                     .await;

@@ -19,6 +19,7 @@ message SubmitJobRequest {
   string name = 1; string user = 2; string partition = 3;
   Resources request = 4; uint64 walltime_secs = 5;
   uint64 priority = 6; string command = 7;
+  string container = 9;
 }
 message SubmitJobReply { uint64 job_id = 1; }
 message CancelJobRequest { uint64 job_id = 1; string user = 2; }
@@ -35,6 +36,7 @@ message JobInfo {
   string state = 5; Resources request = 6; uint64 walltime_secs = 7;
   uint64 priority = 8; uint64 submit_time = 9; uint64 planned_start = 10;
   repeated string nodes = 11;
+  string container = 14;
 }
 
 message NodeInfo {
@@ -50,7 +52,9 @@ message HeartbeatReply { bool ok = 1; }
 message FetchWorkRequest { string node = 1; }
 message FetchWorkReply {
   message Assignment { uint64 job_id = 1; string command = 2; Resources request = 3; uint64 start = 4;
-                       uint64 walltime_secs = 5; string name = 6; }
+                       uint64 walltime_secs = 5; string name = 6;
+                       string container = 7;
+                       repeated string nodelist = 8; uint32 rank = 9; }
   repeated Assignment assignments = 1;
 }
 message ReportCompletionRequest { string node = 1; uint64 job_id = 2; int32 exit_code = 3; }
