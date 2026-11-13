@@ -36,9 +36,9 @@ proposed in [`docs/SLURM_Scheduler_Research_and_Rust_Design.md`](docs/SLURM_Sche
 | `gnomon-fsm` | Replicated state machine, snapshots, injected clock, **event journal**, node registry, work assignments | 4.1 |
 | `gnomon-sched` | Coalescing eval broker, parallel workers, **per-vertex optimistic plan applier**, `backfill_pass`, **runtime-quantile estimator**, **shadow mode** | 4.3 |
 | `gnomon-policy` | **Policy-as-data** (fairshare/QoS/limits JSON) + **wasmtime-sandboxed priority plugins** | 4.5 |
-| `gnomon-consensus` | **openraft** log/state-machine store bridging Raft to the FSM | 4.1 |
+| `gnomon-consensus` | **openraft** storage bridging Raft to the FSM: in-memory `Store` and **durable `DiskStore`** (fsync'd checksummed log, atomic vote/snapshot, crash recovery); durable event journal for the controller | 4.1 |
 | `gnomon-api` | **tonic gRPC** service: lock-free snapshot reads, index-aware blocking queries | 4.3 |
-| `gnomon-ctl` | Controller daemon (gRPC server + background scheduler loop) | 4.6 |
+| `gnomon-ctl` | Controller daemon (gRPC server + background scheduler loop); `--state-dir` / `GNOMON_STATE_DIR` makes it restart-safe | 4.6 |
 | `gnomon-agent` | Node agent: real /proc + GPU probing, registration, heartbeats, job launch | 4.6 |
 | `gnomon-cli` | **Slurm-compatible shims**: `gnbatch` (parses #SBATCH), `gnqueue`, `gncancel`, `gninfo` | 4.5 |
 | `gnomon-sim` | **Exact replay**, counterfactual policy evaluation on recorded history, SWF trace simulator, metrics | 6.3 |
@@ -116,7 +116,7 @@ CI installs `protoc` from `protobuf-compiler`; do the same locally (or set `PROT
 ## Run it end-to-end
 
 ```sh
-gnomon-ctl &                     # gRPC on :7631
+gnomon-ctl &                     # gRPC on :7631; add --state-dir DIR (or GNOMON_STATE_DIR) to survive restarts
 GNOMON_NODE=node0 gnomon-agent & # registers real hardware, heartbeats, executes jobs
 gnbatch --name train -c 8 --gpus 2 -t 3600 train.sh arg1     # parses #SBATCH too; flags win
 gnqueue; gninfo; gncancel 3
@@ -125,7 +125,10 @@ gnqueue; gninfo; gncancel 3
 ## Roadmap status (report section 4.6)
 
 1. [x] FSM + graph + optimistic scheduler skeleton
-2. [x] openraft store (log/state machine/snapshot); in-memory log — persistence + network layer next
+2. [x] openraft store (log/state machine/snapshot), durable on disk (`DiskStore`: fsync'd, checksummed
+       log, atomic vote/commit/snapshot, torn-tail recovery, exact FSM rebuild); the single controller
+       journals every event under `--state-dir` and recovers on restart — Raft network layer, multi-node
+       replication and routing controller writes through `client_write` next
 3. [x] gRPC API tier + Slurm-compatible CLI shims
 4. [x] Agent registration/heartbeat/exec over the wire; cgroup confinement + CDI injection next
 5. [x] Policy-as-data + WASM-sandboxed priority plugins; fairshare accounting history next
