@@ -30,6 +30,13 @@ pub struct State {
     pub nodes: BTreeMap<String, NodeInfo>,
     /// Work queued per node for FetchWork (phase 4).
     pub assignments: BTreeMap<String, Vec<Assignment>>,
+    /// Node names each placed job holds, in rank order (rank `i` runs on
+    /// `allocations[job][i]`). Kept after completion for job listings;
+    /// dropped when a reservation is cleared or cancelled.
+    pub allocations: BTreeMap<JobId, Vec<String>>,
+    /// Per-rank exit reports of running gang jobs, `rank -> (end, code)`,
+    /// aggregated into the job's completion once every rank has reported.
+    pub rank_reports: BTreeMap<JobId, BTreeMap<u32, (u64, i32)>>,
     next_job_id: u64,
 }
 
@@ -199,12 +206,17 @@ fn place(
     now: u64,
     reserve_only: bool,
 ) -> bool {
-    let (req, d) = match st.jobs.get(&job) {
+    let (req, d, nodes) = match st.jobs.get(&job) {
         Some(j) if j.state == JobState::Pending => {
-            (j.request, dur.unwrap_or(j.walltime.0.as_secs()))
+            (j.request, dur.unwrap_or(j.walltime.0.as_secs()), j.nodes)
         }
         _ => return false, // already placed / cancelled / unknown: reject
     };
+    // A gang must get exactly `nodes` vertices (distinctness is checked by
+    // `commit_job`); single-node jobs keep their historical behaviour.
+    if nodes > 1 && vertices.len() != nodes as usize {
+        return false;
+    }
     if !st
         .graph
         .commit_job(vertices, &req, start, d, Some(job.0), expect)
@@ -220,21 +232,76 @@ fn place(
     };
     j.planned_start = Some(start);
     j.planned_dur = Some(d);
+    let cmd = j.command.clone();
+    let nodelist: Vec<String> = vertices
+        .iter()
+        .filter_map(|&v| st.graph.vertices.get(v as usize))
+        .map(|vx| vx.name.clone())
+        .collect();
     if running {
-        // Phase 4: enqueue executable work for the owning agent.
-        let cmd = j.command.clone();
-        for &v in vertices {
-            if let Some(vx) = st.graph.vertices.get(v as usize) {
-                let node = vx.name.clone();
-                st.assignments.entry(node).or_default().push(Assignment {
+        // Phase 4: enqueue executable work for the owning agents, one
+        // assignment per node, ranked in vertex order.
+        for (rank, node) in nodelist.iter().enumerate() {
+            st.assignments
+                .entry(node.clone())
+                .or_default()
+                .push(Assignment {
                     job,
                     command: cmd.clone(),
                     start,
+                    rank: rank as u32,
+                    nodelist: nodelist.clone(),
                 });
-            }
         }
     }
+    st.allocations.insert(job, nodelist);
     true
+}
+
+/// Aggregate one gang rank's exit. The job completes when every rank has
+/// reported: its spans are released at the latest rank's end and it is
+/// `Failed` if any rank exited non-zero. Peers are *not* cancelled on the
+/// first failure: agents have no kill channel, so the nodes stay booked
+/// until each rank has really exited (walltime still bounds them), which
+/// keeps the planner consistent with what runs on the hardware.
+/// Rejected (no effect) for jobs that are not running, nodes outside the
+/// job's allocation, and repeated reports from the same rank.
+fn rank_finished(st: &mut State, job: JobId, node: &str, end: u64, code: i32) -> bool {
+    if st.jobs.get(&job).map(|j| j.state) != Some(JobState::Running) {
+        return false;
+    }
+    let Some(alloc) = st.allocations.get(&job) else {
+        return false;
+    };
+    let Some(rank) = alloc.iter().position(|n| n == node) else {
+        return false;
+    };
+    let ranks = alloc.len();
+    let reports = st.rank_reports.entry(job).or_default();
+    if reports.contains_key(&(rank as u32)) {
+        return false;
+    }
+    reports.insert(rank as u32, (end, code));
+    if reports.len() < ranks {
+        return true;
+    }
+    let reports = st.rank_reports.remove(&job).unwrap_or_default();
+    let last = reports.values().map(|r| r.0).max().unwrap_or(end);
+    let failed = reports.values().any(|r| r.1 != 0);
+    finish(st, job, last, if failed { 1 } else { 0 });
+    true
+}
+
+fn finish(st: &mut State, job: JobId, end: u64, code: i32) {
+    if let Some(j) = st.jobs.get_mut(&job) {
+        j.state = if code == 0 {
+            JobState::Completed
+        } else {
+            JobState::Failed
+        };
+    }
+    st.rank_reports.remove(&job);
+    st.graph.release_job(job.0, end);
 }
 
 fn apply_event(st: &mut State, ev: &Event, expect: &[(VertexId, u64)], now: u64) -> bool {
@@ -250,6 +317,7 @@ fn apply_event(st: &mut State, ev: &Event, expect: &[(VertexId, u64)], now: u64)
                 if matches!(j.state, JobState::Pending | JobState::Reserved) {
                     j.state = JobState::Cancelled;
                     st.graph.release_job(id.0, 0);
+                    st.allocations.remove(id);
                 }
             }
         }
@@ -269,16 +337,13 @@ fn apply_event(st: &mut State, ev: &Event, expect: &[(VertexId, u64)], now: u64)
         } => {
             return place(st, *job, vertices, *start, *dur, expect, now, true);
         }
-        Event::JobFinished { job, end, code } => {
-            if let Some(j) = st.jobs.get_mut(job) {
-                j.state = if *code == 0 {
-                    JobState::Completed
-                } else {
-                    JobState::Failed
-                };
-            }
-            st.graph.release_job(job.0, *end);
-        }
+        Event::JobFinished { job, end, code } => finish(st, *job, *end, *code),
+        Event::JobRankFinished {
+            job,
+            node,
+            end,
+            code,
+        } => return rank_finished(st, *job, node, *end, *code),
         Event::JobExtended { job, new_end } => {
             st.graph.extend_job(job.0, *new_end);
             if let Some(j) = st.jobs.get_mut(job) {
@@ -296,6 +361,7 @@ fn apply_event(st: &mut State, ev: &Event, expect: &[(VertexId, u64)], now: u64)
                 .collect();
             for id in reserved {
                 st.graph.release_job(id.0, 0);
+                st.allocations.remove(&id);
                 let j = st.jobs.get_mut(&id).unwrap();
                 j.state = JobState::Pending;
                 j.planned_start = None;
@@ -454,5 +520,229 @@ mod tests {
         let a = fsm.read(|s| (s.jobs.clone(), format!("{:?}", s.graph)));
         let b = replica.read(|s| (s.jobs.clone(), format!("{:?}", s.graph)));
         assert_eq!(a, b);
+    }
+
+    /// Four 4-core nodes (vertices 1..=4, names n0..n3) and a submitted gang.
+    fn gang_setup(nodes: u32) -> (Arc<ManualClock>, Fsm) {
+        let clock = Arc::new(ManualClock::new(1000));
+        let fsm = Fsm::recording(clock.clone());
+        for n in 0..4 {
+            fsm.apply(Event::NodeRegistered {
+                name: format!("n{n}"),
+                capacity: Resources {
+                    cores: 4,
+                    mem_mb: 0,
+                    gpus: 0,
+                },
+            });
+        }
+        let mut j = job(1, 4, 100);
+        j.nodes = nodes;
+        j.command = "mpirun app".into();
+        fsm.apply(Event::JobSubmitted(j));
+        (clock, fsm)
+    }
+
+    fn start(job: u64, vertices: Vec<u32>) -> Event {
+        Event::JobStarted {
+            job: JobId(job),
+            vertices,
+            start: 1000,
+            dur: None,
+        }
+    }
+
+    fn rank_done(node: &str, end: u64, code: i32) -> Event {
+        Event::JobRankFinished {
+            job: JobId(1),
+            node: node.into(),
+            end,
+            code,
+        }
+    }
+
+    fn state_of(fsm: &Fsm, id: u64) -> JobState {
+        fsm.read(|s| s.jobs[&JobId(id)].state)
+    }
+
+    #[test]
+    fn gang_start_enqueues_one_ranked_assignment_per_node() {
+        let (_c, fsm) = gang_setup(3);
+        assert!(fsm.apply_checked(start(1, vec![2, 3, 4])).accepted);
+        fsm.read(|s| {
+            let list = vec!["n1".to_string(), "n2".into(), "n3".into()];
+            assert_eq!(s.allocations[&JobId(1)], list);
+            for (rank, node) in list.iter().enumerate() {
+                let q = &s.assignments[node];
+                assert_eq!(q.len(), 1);
+                assert_eq!(q[0].rank, rank as u32);
+                assert_eq!(q[0].nodelist, list);
+                assert_eq!(q[0].command, "mpirun app");
+                assert_eq!(q[0].start, 1000);
+            }
+            assert!(!s.assignments.contains_key("n0"));
+            for v in 2..=4 {
+                assert_eq!(s.graph.vertex(v).planner.job_span(1), Some((1000, 1100)));
+            }
+        });
+    }
+
+    #[test]
+    fn gang_placement_with_wrong_vertex_count_or_duplicates_is_rejected() {
+        let (_c, fsm) = gang_setup(3);
+        assert!(!fsm.apply_checked(start(1, vec![1, 2])).accepted);
+        assert!(!fsm.apply_checked(start(1, vec![1, 2, 3, 4])).accepted);
+        assert!(!fsm.apply_checked(start(1, vec![1, 1, 2])).accepted);
+        assert_eq!(state_of(&fsm, 1), JobState::Pending);
+        // A conflict on one vertex rejects the whole gang.
+        fsm.apply(Event::JobSubmitted(job(2, 4, 500)));
+        assert!(fsm.apply_checked(start(2, vec![3])).accepted);
+        assert!(!fsm.apply_checked(start(1, vec![1, 2, 3])).accepted);
+        fsm.read(|s| {
+            assert!(s.graph.vertex(1).planner.job_span(1).is_none());
+            assert!(s.graph.vertex(2).planner.job_span(1).is_none());
+            assert!(!s.allocations.contains_key(&JobId(1)));
+        });
+        assert!(fsm.apply_checked(start(1, vec![1, 2, 4])).accepted);
+    }
+
+    #[test]
+    fn gang_completes_only_when_every_rank_reports() {
+        let (clock, fsm) = gang_setup(3);
+        fsm.apply(start(1, vec![1, 2, 3]));
+        clock.set(1040);
+        assert!(fsm.apply_checked(rank_done("n2", 1040, 0)).accepted);
+        assert!(fsm.apply_checked(rank_done("n0", 1050, 0)).accepted);
+        assert_eq!(state_of(&fsm, 1), JobState::Running);
+        // Repeated report from a rank and reports from foreign nodes: ignored.
+        assert!(!fsm.apply_checked(rank_done("n2", 1060, 1)).accepted);
+        assert!(!fsm.apply_checked(rank_done("n3", 1060, 1)).accepted);
+        // Spans stay booked on every node until the last rank exits.
+        fsm.read(|s| assert_eq!(s.graph.vertex(3).planner.job_span(1), Some((1000, 1100))));
+        assert!(fsm.apply_checked(rank_done("n1", 1070, 0)).accepted);
+        assert_eq!(state_of(&fsm, 1), JobState::Completed);
+        fsm.read(|s| {
+            assert!(s.rank_reports.is_empty());
+            for v in 1..=3 {
+                // Released at the latest rank's end.
+                assert_eq!(s.graph.vertex(v).planner.job_span(1), Some((1000, 1070)));
+            }
+            assert_eq!(s.allocations[&JobId(1)].len(), 3, "kept for listings");
+        });
+        // Reports after completion have no effect.
+        assert!(!fsm.apply_checked(rank_done("n0", 1080, 0)).accepted);
+    }
+
+    #[test]
+    fn gang_fails_if_any_rank_fails() {
+        let (_c, fsm) = gang_setup(2);
+        fsm.apply(start(1, vec![1, 2]));
+        fsm.apply(rank_done("n0", 1010, 3));
+        assert_eq!(state_of(&fsm, 1), JobState::Running, "peers keep running");
+        fsm.apply(rank_done("n1", 1020, 0));
+        assert_eq!(state_of(&fsm, 1), JobState::Failed);
+    }
+
+    #[test]
+    fn job_finished_still_ends_a_gang_at_once() {
+        let (_c, fsm) = gang_setup(2);
+        fsm.apply(start(1, vec![1, 2]));
+        fsm.apply(rank_done("n0", 1010, 0));
+        fsm.apply(Event::JobFinished {
+            job: JobId(1),
+            end: 1020,
+            code: 0,
+        });
+        assert_eq!(state_of(&fsm, 1), JobState::Completed);
+        fsm.read(|s| assert!(s.rank_reports.is_empty()));
+    }
+
+    #[test]
+    fn single_node_rank_report_equals_job_finished() {
+        let run = |ev: Event| {
+            let (_c, fsm) = setup();
+            fsm.apply(Event::JobSubmitted(job(1, 2, 100)));
+            fsm.apply(Event::JobStarted {
+                job: JobId(1),
+                vertices: vec![1],
+                start: 1000,
+                dur: None,
+            });
+            fsm.apply(ev);
+            fsm.read(|s| (s.jobs.clone(), format!("{:?}", s.graph)))
+        };
+        for code in [0, 2] {
+            let a = run(Event::JobFinished {
+                job: JobId(1),
+                end: 1030,
+                code,
+            });
+            let b = run(Event::JobRankFinished {
+                job: JobId(1),
+                node: "n0".into(),
+                end: 1030,
+                code,
+            });
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn reservation_clear_and_cancel_drop_gang_allocations() {
+        let (_c, fsm) = gang_setup(2);
+        assert!(
+            fsm.apply_checked(Event::JobReserved {
+                job: JobId(1),
+                vertices: vec![1, 2],
+                start: 2000,
+                dur: None,
+            })
+            .accepted
+        );
+        fsm.read(|s| {
+            assert_eq!(s.allocations[&JobId(1)].len(), 2);
+            assert!(s.assignments.is_empty(), "no work before the gang starts");
+        });
+        fsm.apply(Event::ReservationsCleared { now: 1000 });
+        fsm.read(|s| assert!(s.allocations.is_empty()));
+        fsm.apply(Event::JobReserved {
+            job: JobId(1),
+            vertices: vec![3, 4],
+            start: 2000,
+            dur: None,
+        });
+        fsm.apply(Event::JobCancelled(JobId(1)));
+        fsm.read(|s| {
+            assert!(s.allocations.is_empty());
+            assert!(s.graph.vertex(3).planner.job_span(1).is_none());
+        });
+    }
+
+    #[test]
+    fn gang_journal_replays_to_identical_state() {
+        let (clock, fsm) = gang_setup(3);
+        fsm.apply(start(1, vec![1, 2, 4]));
+        clock.set(1030);
+        fsm.apply(rank_done("n3", 1030, 0));
+        fsm.apply(rank_done("n0", 1030, 1));
+        let mid = fsm.read(|s| format!("{s:?}"));
+        clock.set(1050);
+        fsm.apply(rank_done("n1", 1050, 0));
+        let c2 = Arc::new(ManualClock::new(1000));
+        let replica = Fsm::with_clock(c2.clone());
+        let journal = fsm.journal();
+        for (i, e) in journal.iter().enumerate() {
+            c2.set(e.at);
+            replica.apply(e.event.clone());
+            if i + 2 == journal.len() {
+                // Partial aggregation state replays exactly too.
+                assert_eq!(replica.read(|s| format!("{s:?}")), mid);
+            }
+        }
+        assert_eq!(
+            fsm.read(|s| format!("{s:?}")),
+            replica.read(|s| format!("{s:?}"))
+        );
+        assert_eq!(state_of(&replica, 1), JobState::Failed);
     }
 }
