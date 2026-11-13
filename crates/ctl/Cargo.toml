@@ -9,5 +9,6 @@ gnomon-fsm = { path = "../fsm" }
 gnomon-sched = { path = "../sched" }
 gnomon-api = { path = "../api" }
 gnomon-policy = { path = "../policy" }
+gnomon-consensus = { path = "../consensus" }
 tokio = { version = "1", features = ["full"] }
 tonic = "0.12"
