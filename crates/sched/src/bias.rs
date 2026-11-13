@@ -174,8 +174,10 @@ fn wall_bucket(job: &Job) -> usize {
     log2_bucket(job.walltime.secs() as f64 / 600.0, WALL_BUCKETS)
 }
 
+/// Bucket of the whole job's cores (a gang's request is per node).
 fn core_bucket(job: &Job) -> usize {
-    log2_bucket(job.request.cores.max(1) as f64, CORE_BUCKETS)
+    let cores = u64::from(job.request.cores.max(1)) * u64::from(job.node_count());
+    log2_bucket(cores as f64, CORE_BUCKETS)
 }
 
 fn log_ratio(job: &Job, actual: u64) -> f64 {
@@ -245,9 +247,13 @@ impl BiasCorrectedEstimator {
         p.max(self.cfg.floor_secs.min(wall)).min(wall).max(1)
     }
 
+    /// Wide: a multi-node gang, or a job taking at least `wide_fraction` of
+    /// the largest node (on a single-vertex machine, of the whole machine).
     fn is_wide(&self, job: &Job, shape: MachineShape) -> bool {
-        shape.largest_node_cores > 0
-            && job.request.cores as f64 >= self.cfg.wide_fraction * shape.largest_node_cores as f64
+        job.node_count() > 1
+            || (shape.largest_node_cores > 0
+                && job.request.cores as f64
+                    >= self.cfg.wide_fraction * shape.largest_node_cores as f64)
     }
 
     /// Current planning-level bias offset for `user`, in log units.
@@ -548,6 +554,10 @@ mod tests {
             off.observe(&job("carol", 64, 10_000), 500);
         }
         assert!(off.spans_on(&wide, SHAPE).plan < 2000);
+        // A gang is wide however small its per-node slice is.
+        let mut gang = job("carol", 4, 10_000);
+        gang.nodes = 4;
+        assert_eq!(est.spans_on(&gang, SHAPE), Spans::uniform(10_000));
     }
 
     #[test]
