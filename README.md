@@ -55,6 +55,7 @@ Evaluated on real Parallel Workloads Archive traces — full write-up in
 | **Per-vertex optimistic concurrency.** A plan conflicts only if a vertex it uses changed *and* it no longer fits (was: any event, even a heartbeat). Also fixes rejected plans counted as committed and double placement of one job. | On | 92–100% fewer conflicts, 1.15–1.99× controller throughput |
 | **Exact replay + counterfactuals + shadow mode.** Journal → bit-identical state; recovered history re-scheduled under any policy with the production code; candidate policies run alongside the live one. | Tooling | 5,000-job trace: replay exact, same policy reproduces every start time |
 | **Distribution-aware backfill.** Spans planned at a learned runtime quantile (risk budget); overruns extended, walltime still the kill limit. | Opt-in | Oracle bound: −16% wait, −29% slowdown. Built-in predictor: inconsistent (median −3% wait at θ=0.7, range −15…+21%), so walltime stays default |
+| **Multi-node gang jobs.** `gnbatch -N 4` / `#SBATCH --nodes=4`: the per-node request is placed on N distinct nodes with one common start (all-or-nothing, oracle-tested `match_gang`), in both the start-now and reservation paths; agents get ranked assignments with the nodelist, and the FSM aggregates per-rank completions so replay stays exact. | On (`-N` defaults to 1) | Mixed 16-node simulation: no node oversubscribed, gang ranks start together, full-machine gang not starved under conservative backfill |
 | **Time-varying capacity.** Per-node `CapacityProfile` (power caps, carbon windows) honoured natively by the planner. | Opt-in | Zero cap violations with 85% (power) / 67% (carbon) lower median wait than static derating; no job made unrunnable |
 
 Also: the planner's `earliest_fit` is now a single sweep (validated against a brute-force oracle),
@@ -123,6 +124,7 @@ CI installs `protoc` from `protobuf-compiler`; do the same locally (or set `PROT
 gnomon-ctl &                     # gRPC on :7631; add --state-dir DIR (or GNOMON_STATE_DIR) to survive restarts
 GNOMON_NODE=node0 gnomon-agent & # registers real hardware, heartbeats, executes jobs
 gnbatch --name train -c 8 --gpus 2 -t 3600 train.sh arg1     # parses #SBATCH too; flags win
+gnbatch -N 4 -c 16 -t 3600 mpi.sh # gang: 16 CPUs on each of 4 nodes, same start
 gnqueue; gninfo; gncancel 3
 ```
 

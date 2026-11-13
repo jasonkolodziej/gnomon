@@ -42,8 +42,18 @@ pub struct Outcome {
     pub submit: u64,
     pub start: u64,
     pub end: u64,
+    /// Cores per node.
     pub cores: u32,
     pub walltime: u64,
+    /// Gang size (1 for single-node jobs).
+    pub nodes: u32,
+}
+
+impl Outcome {
+    /// Cores held across every node of the job.
+    pub fn total_cores(&self) -> u64 {
+        self.cores as u64 * self.nodes.max(1) as u64
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -182,6 +192,7 @@ impl Simulator {
                     end: ft,
                     cores: job.request.cores,
                     walltime: job.walltime.secs(),
+                    nodes: job.node_count(),
                 });
             }
             while ai < arrivals.len() && arrivals[ai].job.submit_time <= t {
@@ -285,7 +296,12 @@ mod tests {
         let mut ev: Vec<(u64, i64)> = r
             .outcomes
             .iter()
-            .flat_map(|o| [(o.start, o.cores as i64), (o.end, -(o.cores as i64))])
+            .flat_map(|o| {
+                [
+                    (o.start, o.total_cores() as i64),
+                    (o.end, -(o.total_cores() as i64)),
+                ]
+            })
             .collect();
         ev.sort();
         let mut used = 0;
@@ -349,7 +365,12 @@ mod tests {
         let mut ev: Vec<(u64, i64)> = r
             .outcomes
             .iter()
-            .flat_map(|o| [(o.start, o.cores as i64), (o.end, -(o.cores as i64))])
+            .flat_map(|o| {
+                [
+                    (o.start, o.total_cores() as i64),
+                    (o.end, -(o.total_cores() as i64)),
+                ]
+            })
             .collect();
         ev.sort();
         let mut used = 0;
@@ -401,5 +422,209 @@ mod tests {
             Simulator::new(Machine::single(32), Arc::new(BackfillPolicy::default())).run(&w);
         let e2 = metrics::energy(&naive, &cap, 32, &[400.0; 24], 10.0);
         assert!(e2.over_cap_core_h > 0.0, "unaware planner violates the cap");
+    }
+
+    fn cluster(nodes: usize, cores: u32) -> Machine {
+        Machine {
+            nodes: (0..nodes)
+                .map(|i| {
+                    (
+                        format!("n{i:02}"),
+                        Resources {
+                            cores,
+                            mem_mb: 0,
+                            gpus: 0,
+                        },
+                    )
+                })
+                .collect(),
+            profile: None,
+        }
+    }
+
+    fn sized(id: u64, submit: u64, cores: u32, nodes: u32, wall: u64, actual: u64) -> SimJob {
+        let mut job = Job::new(
+            JobId(id),
+            "g",
+            "u",
+            Resources {
+                cores,
+                mem_mb: 0,
+                gpus: 0,
+            },
+            Walltime(Duration::from_secs(wall)),
+        );
+        job.nodes = nodes;
+        job.submit_time = submit;
+        job.priority = 0;
+        SimJob { job, actual }
+    }
+
+    /// Mixed single-node / gang workload for a 16-node machine.
+    fn mixed_workload(n: u64) -> Vec<SimJob> {
+        let mut x: u64 = 7;
+        let mut rnd = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        (0..n)
+            .map(|i| {
+                let wall = 600 + rnd() % 5400;
+                let actual = (wall * (10 + rnd() % 90) / 100).max(1);
+                let nodes = match rnd() % 6 {
+                    0 => 16,
+                    1 | 2 => 2 + (rnd() % 7) as u32,
+                    _ => 1,
+                };
+                let cores = 1 + (rnd() % 8) as u32;
+                sized(i + 1, 10_000 + i * 600, cores, nodes, wall, actual)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mixed_gang_workload_never_oversubscribes_and_gangs_start_together() {
+        let w = mixed_workload(240);
+        let machine = cluster(16, 8);
+        let r = Simulator::new(machine.clone(), Arc::new(BackfillPolicy::default())).run(&w);
+        assert_eq!(r.outcomes.len(), 240);
+        let delayed_gangs = r
+            .outcomes
+            .iter()
+            .filter(|o| o.nodes > 1 && o.start > o.submit)
+            .count();
+        assert!(delayed_gangs > 10, "gangs contend: {delayed_gangs}");
+        assert_eq!(r.unplaced, 0);
+        let nodes_of: BTreeMap<JobId, u32> = w.iter().map(|s| (s.job.id, s.job.nodes)).collect();
+        assert!(nodes_of.values().filter(|&&n| n == 16).count() > 10);
+
+        // Re-apply the journal and keep each accepted start: the vertices a
+        // job really got, and the ranked assignments it produced.
+        let clock = Arc::new(ManualClock::new(0));
+        let fsm = Fsm::with_clock(clock.clone());
+        let mut placed: BTreeMap<JobId, (Vec<u32>, u64)> = BTreeMap::new();
+        for e in &r.journal {
+            clock.set(e.at);
+            let accepted = fsm.apply_checked(e.event.clone()).accepted;
+            if let (
+                true,
+                Event::JobStarted {
+                    job,
+                    vertices,
+                    start,
+                    ..
+                },
+            ) = (accepted, &e.event)
+            {
+                assert!(placed.insert(*job, (vertices.clone(), *start)).is_none());
+                // Every rank's assignment carries the same start and nodelist.
+                let ranks: Vec<(u32, u64, usize)> = fsm.read(|st| {
+                    st.assignments
+                        .values()
+                        .flatten()
+                        .filter(|a| a.job == *job)
+                        .map(|a| (a.rank, a.start, a.nodelist.len()))
+                        .collect()
+                });
+                let n = nodes_of[job] as usize;
+                assert_eq!(ranks.len(), n, "job {job}: one assignment per rank");
+                let mut seen: Vec<u32> = ranks.iter().map(|r| r.0).collect();
+                seen.sort_unstable();
+                assert_eq!(seen, (0..n as u32).collect::<Vec<_>>());
+                assert!(ranks.iter().all(|r| r.1 == *start && r.2 == n));
+            }
+        }
+        // Per-node usage sweep: no node ever exceeds its 8 cores.
+        let mut per_node: BTreeMap<u32, Vec<(u64, i64)>> = BTreeMap::new();
+        for o in &r.outcomes {
+            let (verts, start) = &placed[&o.id];
+            assert_eq!(*start, o.start, "job {} started as planned", o.id);
+            assert_eq!(verts.len(), o.nodes as usize);
+            let mut uniq = verts.clone();
+            uniq.sort_unstable();
+            uniq.dedup();
+            assert_eq!(uniq.len(), verts.len(), "distinct nodes");
+            for &v in verts {
+                let ev = per_node.entry(v).or_default();
+                ev.push((o.start, o.cores as i64));
+                ev.push((o.end, -(o.cores as i64)));
+            }
+        }
+        for (v, mut ev) in per_node {
+            ev.sort();
+            let mut used = 0;
+            for (t, d) in ev {
+                used += d;
+                assert!(used <= 8, "node vertex {v} oversubscribed at {t}: {used}");
+            }
+        }
+        // Gang journals replay exactly, and re-running the recovered workload
+        // reproduces every start time.
+        let a = replay::rebuild(&r.journal);
+        assert_eq!(
+            replay::fingerprint(&a),
+            replay::fingerprint(&replay::rebuild(
+                &replay::from_jsonl(&replay::to_jsonl(&r.journal)).unwrap()
+            ))
+        );
+        let recovered = replay::workload_from_journal(&r.journal);
+        let r2 = Simulator::new(machine, Arc::new(BackfillPolicy::default())).run(&recovered);
+        let starts = |r: &SimResult| {
+            r.outcomes
+                .iter()
+                .map(|o| (o.id, o.start))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(starts(&r), starts(&r2));
+    }
+
+    #[test]
+    fn conservative_backfill_does_not_starve_a_full_machine_gang() {
+        // A steady stream of single-node jobs (more demand than 16 nodes can
+        // serve) with a full-machine gang submitted early.
+        let mut w: Vec<SimJob> = (0..300u64)
+            .map(|i| {
+                let short = i % 3 == 0;
+                let (wall, actual) = if short {
+                    (300, 200)
+                } else {
+                    (3600, 1800 + (i * 37) % 1800)
+                };
+                sized(i + 1, i * 60, 8, 1, wall, actual)
+            })
+            .collect();
+        let gang_id = JobId(11); // submitted at t=600, behind ten running jobs
+        w[10] = sized(11, 600, 8, 16, 3600, 3000);
+        let run = |max_reservations| {
+            let mut sim = Simulator::new(cluster(16, 8), Arc::new(BackfillPolicy::default()));
+            sim.opts.max_reservations = max_reservations;
+            let r = sim.run(&w);
+            assert_eq!(r.unplaced, 0);
+            r
+        };
+        let r = run(PassOptions::default().max_reservations);
+        let gang = r.outcomes.iter().find(|o| o.id == gang_id).unwrap();
+        // Its reservation can only move earlier: it starts no later than the
+        // walltime of the jobs running when it arrived.
+        assert!(
+            gang.start - gang.submit <= 3600,
+            "gang waited {}s",
+            gang.start - gang.submit
+        );
+        // Short jobs still backfilled ahead of it.
+        assert!(r
+            .outcomes
+            .iter()
+            .any(|o| o.id > gang_id && o.start < gang.start));
+        // Without reservations the same gang waits until the stream dries up.
+        let starved = run(0);
+        let g2 = starved.outcomes.iter().find(|o| o.id == gang_id).unwrap();
+        assert!(
+            g2.start - g2.submit > 4 * 3600,
+            "no-reservation gang waited only {}s",
+            g2.start - g2.submit
+        );
     }
 }

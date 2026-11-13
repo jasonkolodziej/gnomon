@@ -19,6 +19,7 @@ message SubmitJobRequest {
   string name = 1; string user = 2; string partition = 3;
   Resources request = 4; uint64 walltime_secs = 5;
   uint64 priority = 6; string command = 7;
+  uint32 nodes = 8;
   string container = 9;
 }
 message SubmitJobReply { uint64 job_id = 1; }
@@ -37,6 +38,8 @@ message JobInfo {
   uint64 priority = 8; uint64 submit_time = 9; uint64 planned_start = 10;
   repeated string nodes = 11;
   string container = 14;
+  // Gang size (Slurm NODES). Named num_nodes because field 11 is already `nodes`.
+  uint32 num_nodes = 12;
 }
 
 message NodeInfo {

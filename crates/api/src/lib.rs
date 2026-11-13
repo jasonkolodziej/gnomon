@@ -44,7 +44,9 @@ fn state_name(s: JobState) -> String {
     .into()
 }
 
-fn job_info(j: &Job) -> JobInfo {
+/// Wire view of a job. `nodes` lists every node the job holds (all ranks
+/// of a gang, in rank order) once it has been placed.
+fn job_info(j: &Job, nodes: Option<&Vec<String>>) -> JobInfo {
     JobInfo {
         id: j.id.0,
         name: j.name.clone(),
@@ -60,7 +62,8 @@ fn job_info(j: &Job) -> JobInfo {
         priority: j.priority,
         submit_time: j.submit_time,
         planned_start: j.planned_start.unwrap_or(0),
-        nodes: vec![],
+        nodes: nodes.cloned().unwrap_or_default(),
+        num_nodes: j.node_count(),
         container: j.container.clone().unwrap_or_default(),
     }
 }
@@ -92,6 +95,7 @@ impl Scheduler for SchedulerSvc {
         };
         job.priority = r.priority;
         job.command = r.command;
+        job.nodes = r.nodes.max(1);
         job.container = Some(r.container).filter(|c| !c.is_empty());
         self.fsm.apply(Event::JobSubmitted(job.clone()));
         self.broker.enqueue(&job, self.fsm.index());
@@ -117,8 +121,9 @@ impl Scheduler for SchedulerSvc {
                 let job = snap
                     .job(JobId(r.job_id))
                     .ok_or_else(|| Status::not_found("no such job"))?;
+                let nodes = snap.state().allocations.get(&job.id);
                 return Ok(Response::new(GetJobReply {
-                    job: Some(job_info(job)),
+                    job: Some(job_info(job, nodes)),
                 }));
             }
             if std::time::Instant::now() > deadline {
@@ -140,7 +145,7 @@ impl Scheduler for SchedulerSvc {
             .values()
             .filter(|j| r.user.is_empty() || j.user == r.user)
             .filter(|j| r.state.is_empty() || state_name(j.state) == r.state)
-            .map(job_info)
+            .map(|j| job_info(j, snap.state().allocations.get(&j.id)))
             .collect();
         Ok(Response::new(ListJobsReply {
             jobs,
@@ -252,10 +257,8 @@ impl Scheduler for SchedulerSvc {
                     walltime_secs: j.walltime.secs(),
                     name: j.name.clone(),
                     container: j.container.clone().unwrap_or_default(),
-                    // Gang placement fills these; the agent defaults an
-                    // empty nodelist to its own node, rank 0.
-                    nodelist: vec![],
-                    rank: 0,
+                    nodelist: a.nodelist.clone(),
+                    rank: a.rank,
                 })
             })
             .collect();
@@ -273,17 +276,200 @@ impl Scheduler for SchedulerSvc {
         req: Request<ReportCompletionRequest>,
     ) -> Result<Response<ReportCompletionReply>, Status> {
         let r = req.into_inner();
-        self.fsm.apply(Event::JobFinished {
-            job: JobId(r.job_id),
-            end: gnomon_core::now_secs(),
-            code: r.exit_code,
-        });
-        Ok(Response::new(ReportCompletionReply { ok: true }))
+        let job = JobId(r.job_id);
+        let end = gnomon_core::now_secs();
+        // Gang ranks report individually; the FSM aggregates them so replay
+        // reproduces exactly when the job completed. Single-node jobs keep
+        // the plain JobFinished event.
+        let gang = self
+            .fsm
+            .read(|st| st.jobs.get(&job).is_some_and(Job::is_gang));
+        let ev = if gang {
+            Event::JobRankFinished {
+                job,
+                node: r.node,
+                end,
+                code: r.exit_code,
+            }
+        } else {
+            Event::JobFinished {
+                job,
+                end,
+                code: r.exit_code,
+            }
+        };
+        let ok = self.fsm.apply_checked(ev).accepted;
+        Ok(Response::new(ReportCompletionReply { ok }))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use gnomon_core::SystemClock;
+    use gnomon_sched::{backfill_pass, BackfillPolicy, PassOptions, PlanApplier};
+
+    fn svc() -> SchedulerSvc {
+        SchedulerSvc {
+            fsm: Arc::new(Fsm::recording(Arc::new(SystemClock))),
+            broker: Arc::new(EvalBroker::new()),
+        }
+    }
+
+    async fn register(s: &SchedulerSvc, name: &str) {
+        s.register_node(Request::new(RegisterNodeRequest {
+            name: name.into(),
+            capacity: Some(pb::Resources {
+                cores: 4,
+                mem_mb: 1024,
+                gpus: 0,
+            }),
+        }))
+        .await
+        .unwrap();
+    }
+
+    async fn submit(s: &SchedulerSvc, nodes: u32) -> u64 {
+        s.submit_job(Request::new(SubmitJobRequest {
+            name: "mpi".into(),
+            user: "u".into(),
+            partition: String::new(),
+            request: Some(pb::Resources {
+                cores: 4,
+                mem_mb: 0,
+                gpus: 0,
+            }),
+            walltime_secs: 600,
+            priority: 1,
+            command: "app".into(),
+            nodes,
+            container: String::new(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .job_id
+    }
+
+    async fn job(s: &SchedulerSvc, id: u64) -> JobInfo {
+        s.get_job(Request::new(GetJobRequest {
+            job_id: id,
+            wait_index: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .job
+        .unwrap()
+    }
+
+    async fn report(s: &SchedulerSvc, node: &str, id: u64, code: i32) -> bool {
+        s.report_completion(Request::new(ReportCompletionRequest {
+            node: node.into(),
+            job_id: id,
+            exit_code: code,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .ok
+    }
+
+    fn schedule(s: &SchedulerSvc) {
+        backfill_pass(
+            &s.fsm,
+            &BackfillPolicy::default(),
+            &PlanApplier::new(),
+            PassOptions::default(),
+        );
+    }
+
+    #[tokio::test]
+    async fn gang_job_flows_through_submit_fetch_and_per_rank_completion() {
+        let s = svc();
+        for n in ["a", "b", "c"] {
+            register(&s, n).await;
+        }
+        let id = submit(&s, 2).await;
+        let pending = job(&s, id).await;
+        assert_eq!(pending.num_nodes, 2);
+        assert!(pending.nodes.is_empty());
+        schedule(&s);
+        let info = job(&s, id).await;
+        assert_eq!(info.state, "RUNNING");
+        assert_eq!(info.nodes.len(), 2, "every node of the gang is listed");
+        let listed = s
+            .list_jobs(Request::new(ListJobsRequest {
+                user: String::new(),
+                state: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.jobs[0].nodes, info.nodes);
+
+        for (rank, node) in info.nodes.iter().enumerate() {
+            let work = s
+                .fetch_work(Request::new(FetchWorkRequest { node: node.clone() }))
+                .await
+                .unwrap()
+                .into_inner()
+                .assignments;
+            assert_eq!(work.len(), 1);
+            assert_eq!(work[0].rank, rank as u32);
+            assert_eq!(work[0].nodelist, info.nodes);
+            assert_eq!(work[0].job_id, id);
+        }
+        // First rank done: the gang keeps running; a foreign node is refused.
+        assert!(report(&s, &info.nodes[1], id, 0).await);
+        assert_eq!(job(&s, id).await.state, "RUNNING");
+        let outsider = ["a", "b", "c"]
+            .into_iter()
+            .find(|n| !info.nodes.iter().any(|m| m == n))
+            .unwrap();
+        assert!(!report(&s, outsider, id, 0).await);
+        assert!(report(&s, &info.nodes[0], id, 0).await);
+        assert_eq!(job(&s, id).await.state, "COMPLETED");
+        let ranks = s
+            .fsm
+            .journal()
+            .iter()
+            .filter(|e| matches!(e.event, Event::JobRankFinished { .. }))
+            .count();
+        assert_eq!(ranks, 3);
+    }
+
+    #[tokio::test]
+    async fn single_node_job_keeps_job_finished_and_lists_its_node() {
+        let s = svc();
+        register(&s, "a").await;
+        let id = submit(&s, 0).await; // 0 = unset on the wire -> 1 node
+        schedule(&s);
+        let info = job(&s, id).await;
+        assert_eq!(info.num_nodes, 1);
+        assert_eq!(info.nodes, vec!["a".to_string()]);
+        let work = s
+            .fetch_work(Request::new(FetchWorkRequest { node: "a".into() }))
+            .await
+            .unwrap()
+            .into_inner()
+            .assignments;
+        assert_eq!(
+            (work[0].rank, work[0].nodelist.clone()),
+            (0, vec!["a".into()])
+        );
+        assert!(report(&s, "a", id, 1).await);
+        assert_eq!(job(&s, id).await.state, "FAILED");
+        let journal = s.fsm.journal();
+        assert!(matches!(
+            journal.last().unwrap().event,
+            Event::JobFinished { code: 1, .. }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod container_tests {
     use super::*;
 
     fn svc() -> SchedulerSvc {
@@ -306,6 +492,7 @@ mod tests {
             walltime_secs: 60,
             priority: 1,
             command: "true".into(),
+            nodes: 1,
             container: container.into(),
         }
     }
@@ -363,7 +550,7 @@ mod tests {
             .into_inner();
         assert_eq!(work.assignments.len(), 1);
         assert_eq!(work.assignments[0].container, "alpine:3.20");
-        assert!(work.assignments[0].nodelist.is_empty());
+        assert_eq!(work.assignments[0].nodelist, vec!["n0".to_string()]);
         assert_eq!(work.assignments[0].rank, 0);
     }
 

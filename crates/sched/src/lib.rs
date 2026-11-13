@@ -244,6 +244,9 @@ pub trait Policy: Send + Sync {
 /// planners — backfill as a pure function (the "when" separated from the
 /// "where", Fluxion's qmanager/resource split). With an `estimator`, spans
 /// are planned at a runtime quantile instead of the user's walltime.
+/// Gang jobs (`nodes > 1`) are placed all-or-nothing on `nodes` distinct
+/// node leaves with a common start ([`ResourceGraph::match_gang`]), in both
+/// the start-now path and the reservation path.
 pub struct BackfillPolicy {
     /// How far ahead reservations may look (Slurm's bf_window, in seconds).
     pub window_secs: u64,
@@ -306,6 +309,17 @@ impl Policy for BackfillPolicy {
         } else {
             None
         };
+        let nodes = job.node_count();
+        if !allow_reserve && nodes > 1 {
+            return match gang_start_now(graph, job, now, dur) {
+                Some(vertices) => Decision::Start {
+                    vertices,
+                    start: now,
+                    dur: dur_field,
+                },
+                None => Decision::Defer,
+            };
+        }
         if !allow_reserve {
             // Cheap "start now?" check: skip vertices without free capacity now.
             for id in graph.leaves() {
@@ -328,7 +342,7 @@ impl Policy for BackfillPolicy {
             }
             return Decision::Defer;
         }
-        match graph.match_request(&job.request, now, dur, job.id.0) {
+        match graph.match_gang(&job.request, nodes, now, dur, job.id.0) {
             Some((vertices, start)) if start <= now => Decision::Start {
                 vertices,
                 start,
@@ -342,6 +356,24 @@ impl Policy for BackfillPolicy {
             _ => Decision::Defer,
         }
     }
+}
+
+/// "Start now?" for a gang: the first `nodes` schedulable node leaves (in
+/// vertex order) that can each hold the per-node request for `[now,
+/// now+dur)`, or `None` if fewer are free. One `earliest_fit` per leaf at
+/// most, stopping as soon as the gang is complete.
+fn gang_start_now(graph: &ResourceGraph, job: &Job, now: u64, dur: u64) -> Option<Vec<VertexId>> {
+    let need = job.node_count() as usize;
+    let mut chosen = Vec::with_capacity(need);
+    for id in graph.schedulable_nodes() {
+        if graph.vertex(id).earliest_fit(&job.request, now, dur) == Some(now) {
+            chosen.push(id);
+            if chosen.len() == need {
+                return Some(chosen);
+            }
+        }
+    }
+    None
 }
 
 /// How the applier decides that an optimistic plan conflicted.
@@ -900,5 +932,148 @@ mod tests {
             matches!(diffs[0].candidate, Decision::Start { .. }),
             "candidate would backfill now"
         );
+    }
+
+    fn cluster(nodes: u32, cores: u32, now: u64) -> Fsm {
+        let fsm = Fsm::with_clock(Arc::new(gnomon_core::ManualClock::new(now)));
+        for n in 0..nodes {
+            fsm.apply(Event::NodeRegistered {
+                name: format!("n{n}"),
+                capacity: Resources {
+                    cores,
+                    mem_mb: 0,
+                    gpus: 0,
+                },
+            });
+        }
+        fsm
+    }
+
+    fn sized_job(id: u64, cores: u32, nodes: u32, wall: u64) -> Job {
+        let mut j = Job::new(
+            JobId(id),
+            "j",
+            "u",
+            Resources {
+                cores,
+                mem_mb: 0,
+                gpus: 0,
+            },
+            Walltime(Duration::from_secs(wall)),
+        );
+        j.nodes = nodes;
+        j.submit_time = 0;
+        j
+    }
+
+    #[test]
+    fn gang_starts_now_or_reserves_in_both_policy_paths() {
+        let fsm = cluster(4, 4, 1000);
+        // n0 (vertex 1) is busy until 1500.
+        fsm.apply(Event::JobSubmitted(sized_job(1, 4, 1, 500)));
+        assert!(
+            fsm.apply_checked(Event::JobStarted {
+                job: JobId(1),
+                vertices: vec![1],
+                start: 1000,
+                dur: None
+            })
+            .accepted
+        );
+        let policy = BackfillPolicy::default();
+        let three = sized_job(2, 4, 3, 100);
+        let four = sized_job(3, 4, 4, 100);
+        fsm.read(|st| {
+            for allow in [true, false] {
+                assert_eq!(
+                    policy.place(&st.graph, &three, 1000, allow),
+                    Decision::Start {
+                        vertices: vec![2, 3, 4],
+                        start: 1000,
+                        dur: None
+                    },
+                    "allow_reserve={allow}"
+                );
+            }
+            // Four nodes only once n0 frees up.
+            assert_eq!(
+                policy.place(&st.graph, &four, 1000, true),
+                Decision::Reserve {
+                    vertices: vec![1, 2, 3, 4],
+                    start: 1500,
+                    dur: None
+                }
+            );
+            assert_eq!(policy.place(&st.graph, &four, 1000, false), Decision::Defer);
+            // Beyond the reservation window: defer.
+            let short = BackfillPolicy::new(100);
+            assert_eq!(short.place(&st.graph, &four, 1000, true), Decision::Defer);
+        });
+    }
+
+    #[test]
+    fn backfill_pass_starts_gang_and_counts_it_once() {
+        let fsm = cluster(4, 4, 1000);
+        fsm.apply(Event::JobSubmitted(sized_job(1, 2, 4, 100)));
+        let stats = backfill_pass(
+            &fsm,
+            &BackfillPolicy::default(),
+            &PlanApplier::new(),
+            PassOptions::default(),
+        );
+        assert_eq!(stats.started, 1);
+        fsm.read(|st| {
+            assert_eq!(st.jobs[&JobId(1)].state, JobState::Running);
+            assert_eq!(st.allocations[&JobId(1)].len(), 4);
+            assert_eq!(st.assignments.len(), 4);
+        });
+    }
+
+    #[test]
+    fn conservative_backfill_protects_gang_reservation() {
+        // n0 is busy until 1500; a 4-node gang (higher priority) must keep its
+        // reservation at 1500 while single-node jobs backfill around it, and
+        // a backfill candidate that would delay it must wait.
+        let fsm = cluster(4, 4, 1000);
+        fsm.apply(Event::JobSubmitted(sized_job(1, 4, 1, 500)));
+        fsm.apply(Event::JobStarted {
+            job: JobId(1),
+            vertices: vec![1],
+            start: 1000,
+            dur: None,
+        });
+        let mut gang = sized_job(2, 4, 4, 1000);
+        gang.priority = 10;
+        fsm.apply(Event::JobSubmitted(gang));
+        fsm.apply(Event::JobSubmitted(sized_job(3, 4, 1, 400))); // fits before 1500
+        fsm.apply(Event::JobSubmitted(sized_job(4, 4, 1, 900))); // would delay the gang
+        let stats = backfill_pass(
+            &fsm,
+            &BackfillPolicy::default(),
+            &PlanApplier::new(),
+            PassOptions::default(),
+        );
+        assert_eq!(stats.conflicts, 0);
+        fsm.read(|st| {
+            let j = |id| &st.jobs[&JobId(id)];
+            assert_eq!(j(2).state, JobState::Reserved);
+            assert_eq!(j(2).planned_start, Some(1500));
+            assert_eq!(j(3).state, JobState::Running);
+            assert_eq!(j(4).state, JobState::Reserved);
+            assert_eq!(j(4).planned_start, Some(2500));
+        });
+    }
+
+    #[test]
+    fn shadow_policy_compares_gang_placements() {
+        let fsm = cluster(4, 4, 1000);
+        let shadow = ShadowPolicy::new(
+            Arc::new(BackfillPolicy::default()),
+            Arc::new(BackfillPolicy::new(10)),
+        );
+        let gang = sized_job(1, 4, 2, 100);
+        let d = fsm.read(|st| shadow.place(&st.graph, &gang, 1000, true));
+        assert_eq!(d.vertices().len(), 2);
+        assert_eq!(shadow.agreement(), 1.0);
     }
 }

@@ -156,6 +156,16 @@ pub struct Job {
     /// Podman); `None` runs it directly on the node under a cgroup.
     #[serde(default)]
     pub container: Option<String>,
+    /// Gang size (Slurm `-N/--nodes`): the job needs this many distinct node
+    /// vertices, each with `request` free for the whole span, all starting
+    /// together. `request` is *per node*. 0 is treated as 1 (see
+    /// [`Job::node_count`]).
+    #[serde(default = "one")]
+    pub nodes: u32,
+}
+
+fn one() -> u32 {
+    1
 }
 
 impl Job {
@@ -174,7 +184,18 @@ impl Job {
             planned_dur: None,
             command: String::new(),
             container: None,
+            nodes: 1,
         }
+    }
+
+    /// Effective gang size: `nodes`, with 0 treated as 1.
+    pub fn node_count(&self) -> u32 {
+        self.nodes.max(1)
+    }
+
+    /// Whether this is a multi-node gang job (`nodes > 1`).
+    pub fn is_gang(&self) -> bool {
+        self.node_count() > 1
     }
 }
 
@@ -209,6 +230,16 @@ pub enum Event {
     /// the rest of the reserved window for backfill).
     JobFinished {
         job: JobId,
+        end: u64,
+        code: i32,
+    },
+    /// One rank of a running gang job exited on `node`. The FSM aggregates
+    /// these: the job finishes (spans released at the latest rank's `end`)
+    /// once every rank has reported, and is `Failed` if any rank exited
+    /// non-zero. For a single-node job this is equivalent to `JobFinished`.
+    JobRankFinished {
+        job: JobId,
+        node: String,
         end: u64,
         code: i32,
     },
@@ -310,4 +341,55 @@ pub struct Assignment {
     pub job: JobId,
     pub command: String,
     pub start: u64,
+    /// Rank of this node within the job (0 for single-node jobs); ranks follow
+    /// the order of the job's placement vertices.
+    #[serde(default)]
+    pub rank: u32,
+    /// Every node of the job in rank order (Slurm's `SLURM_JOB_NODELIST`).
+    #[serde(default)]
+    pub nodelist: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_nodes_defaults_to_one_for_old_records() {
+        let mut v = serde_json::to_value(Job::new(
+            JobId(1),
+            "j",
+            "u",
+            Resources::default(),
+            Walltime(Duration::from_secs(1)),
+        ))
+        .unwrap();
+        v.as_object_mut().unwrap().remove("nodes");
+        let j: Job = serde_json::from_value(v).unwrap();
+        assert_eq!(j.nodes, 1);
+        assert!(!j.is_gang());
+    }
+
+    #[test]
+    fn zero_nodes_counts_as_one() {
+        let mut j = Job::new(
+            JobId(1),
+            "j",
+            "u",
+            Resources::default(),
+            Walltime(Duration::from_secs(1)),
+        );
+        j.nodes = 0;
+        assert_eq!(j.node_count(), 1);
+        j.nodes = 4;
+        assert_eq!(j.node_count(), 4);
+        assert!(j.is_gang());
+    }
+
+    #[test]
+    fn assignment_rank_fields_default_for_old_records() {
+        let a: Assignment = serde_json::from_str(r#"{"job":3,"command":"x","start":5}"#).unwrap();
+        assert_eq!(a.rank, 0);
+        assert!(a.nodelist.is_empty());
+    }
 }
