@@ -7,3 +7,5 @@ description = "In-memory replicated state machine: Raft-agnostic apply + immutab
 gnomon-core = { path = "../core" }
 gnomon-graph = { path = "../graph" }
 serde = { version = "1", features = ["derive"] }
+[dev-dependencies]
+serde_json = "1"

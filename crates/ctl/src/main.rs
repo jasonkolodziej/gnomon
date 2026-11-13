@@ -6,13 +6,55 @@
 //!
 //! Server mode adds a 1 s periodic `backfill_pass` (reservation re-planning,
 //! overrun extension) next to the event-driven broker workers.
+//!
+//! Durability: with `--state-dir <dir>` (or `GNOMON_STATE_DIR`) every applied
+//! event is written to an fsync'd journal before it takes effect
+//! ([`gnomon_consensus::journal::EventJournal`]), and a restart recovers
+//! jobs, nodes, reservations and queued assignments exactly. Without it the
+//! controller is in-memory, as before.
 
-use gnomon_core::{Event, Job, Resources, Walltime};
+use gnomon_core::{Clock, Event, Job, Resources, SystemClock, Walltime};
 use gnomon_fsm::Fsm;
 use gnomon_sched::{BackfillPolicy, EvalBroker, PlanApplier, Policy};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Where to persist controller state: `--state-dir <dir>` (or
+/// `--state-dir=<dir>`) wins over the `GNOMON_STATE_DIR` value `env`.
+fn state_dir(args: &[String], env: Option<String>) -> Option<PathBuf> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--state-dir" {
+            return it.next().map(PathBuf::from);
+        }
+        if let Some(v) = a.strip_prefix("--state-dir=") {
+            return Some(PathBuf::from(v));
+        }
+    }
+    env.filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
+/// The controller FSM: recovered from (and journaled to) `dir` when given,
+/// otherwise in-memory.
+fn open_fsm(dir: Option<&Path>, clock: Arc<dyn Clock>) -> std::io::Result<Arc<Fsm>> {
+    match dir {
+        Some(d) => gnomon_consensus::journal::EventJournal::open_fsm(d, clock),
+        None => Ok(Arc::new(Fsm::with_clock(clock))),
+    }
+}
+
+/// Recovered pending jobs need fresh evaluations: the broker is not durable.
+fn requeue_pending(fsm: &Fsm, broker: &EvalBroker) -> usize {
+    let snap = fsm.snapshot();
+    let mut n = 0;
+    for job in snap.pending_jobs() {
+        broker.enqueue(job, snap.index);
+        n += 1;
+    }
+    n
+}
 
 fn demo() {
     let fsm = Arc::new(Fsm::new());
@@ -136,11 +178,28 @@ async fn main() {
         return;
     }
     use gnomon_api::SchedulerSvc;
-    use gnomon_sched::{BackfillPolicy, EvalBroker, PlanApplier, Policy};
-    use std::sync::Arc;
 
-    let fsm = Arc::new(Fsm::new());
+    let dir = state_dir(&args[1..], std::env::var("GNOMON_STATE_DIR").ok());
+    let fsm = match open_fsm(dir.as_deref(), Arc::new(SystemClock)) {
+        Ok(fsm) => fsm,
+        Err(e) => {
+            let d = dir.as_deref().unwrap_or(Path::new("?")).display();
+            eprintln!("gnomon-ctl: cannot recover state from {d}: {e}");
+            std::process::exit(1);
+        }
+    };
     let broker = Arc::new(EvalBroker::new());
+    if let Some(d) = &dir {
+        let snap = fsm.snapshot();
+        let requeued = requeue_pending(&fsm, &broker);
+        println!(
+            "gnomon-ctl state dir {}: recovered index {}, {} jobs ({requeued} pending), {} nodes",
+            d.display(),
+            snap.index,
+            snap.state().jobs.len(),
+            snap.state().nodes.len()
+        );
+    }
     let applier = Arc::new(PlanApplier::new());
     let policy: Arc<dyn Policy> = Arc::new(BackfillPolicy::new(48 * 3600));
 
@@ -184,4 +243,94 @@ async fn main() {
         .serve(addr)
         .await
         .expect("gRPC server");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gnomon_core::{JobId, JobState, ManualClock};
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn state_dir_flag_beats_env_and_empty_env_is_ignored() {
+        let env = Some("/env".to_string());
+        assert_eq!(
+            state_dir(&args(&["--state-dir", "/flag"]), env.clone()),
+            Some(PathBuf::from("/flag"))
+        );
+        assert_eq!(
+            state_dir(&args(&["--state-dir=/eq"]), env.clone()),
+            Some(PathBuf::from("/eq"))
+        );
+        assert_eq!(state_dir(&[], env), Some(PathBuf::from("/env")));
+        assert_eq!(state_dir(&[], Some(String::new())), None);
+        assert_eq!(state_dir(&[], None), None);
+    }
+
+    fn submit(fsm: &Fsm, id: u64, cores: u32) {
+        fsm.apply(Event::JobSubmitted(Job::new(
+            JobId(id),
+            "j",
+            "u",
+            Resources {
+                cores,
+                mem_mb: 0,
+                gpus: 0,
+            },
+            Walltime(Duration::from_secs(600)),
+        )));
+    }
+
+    #[test]
+    fn restart_with_state_dir_recovers_jobs_nodes_and_reservations() {
+        let dir = std::env::temp_dir().join(format!("gnomon-ctl-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let clock = Arc::new(ManualClock::new(1000));
+        let fsm = open_fsm(Some(&dir), clock.clone()).unwrap();
+        fsm.apply(Event::NodeRegistered {
+            name: "n0".into(),
+            capacity: Resources {
+                cores: 4,
+                mem_mb: 0,
+                gpus: 0,
+            },
+        });
+        submit(&fsm, 1, 4);
+        submit(&fsm, 2, 4);
+        submit(&fsm, 3, 1);
+        // Drive the real scheduling path: job 1 runs, job 2 is reserved behind it.
+        let policy = BackfillPolicy::new(48 * 3600);
+        let applier = PlanApplier::new();
+        for id in [1, 2] {
+            let snap = fsm.snapshot();
+            let plan = policy.schedule(&snap, snap.job(JobId(id)).unwrap());
+            applier.apply(&fsm, &plan).unwrap();
+        }
+        let before = fsm.snapshot();
+        assert_eq!(before.job(JobId(1)).unwrap().state, JobState::Running);
+        assert_eq!(before.job(JobId(2)).unwrap().state, JobState::Reserved);
+        let fp = fsm.read(|st| format!("{st:?}"));
+        drop(fsm);
+
+        clock.set(5000); // restart much later: recovery must not re-time events
+        let fsm = open_fsm(Some(&dir), clock).unwrap();
+        assert_eq!(fsm.read(|st| format!("{st:?}")), fp);
+        assert_eq!(fsm.index(), before.index);
+        assert_eq!(fsm.next_job_id(), JobId(4));
+        let broker = EvalBroker::new();
+        assert_eq!(requeue_pending(&fsm, &broker), 1);
+        assert_eq!(broker.dequeue().map(|e| e.job), Some(JobId(3)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn without_state_dir_the_fsm_is_in_memory() {
+        let fsm = open_fsm(None, Arc::new(ManualClock::new(0))).unwrap();
+        submit(&fsm, 1, 1);
+        let again = open_fsm(None, Arc::new(ManualClock::new(0))).unwrap();
+        assert_eq!(again.index(), 0);
+    }
 }
