@@ -1,18 +1,23 @@
 //! Reproducible evaluation of Gnomon's scheduling features on real HPC
 //! traces from the Parallel Workloads Archive (SWF).
 //!
-//! usage: `experiments <dir-with-swf-traces> <out-dir> [jobs-per-window]`
+//! usage: `experiments <dir-with-swf-traces> <out-dir> [jobs-per-window]
+//! [--only e0|e1|e2|e3]`
 //!
 //! E0  exact replay: journal -> identical state; recovered history under the
 //!     same policy -> identical start times.
 //! E1  distribution-aware backfill: walltime baseline vs runtime quantiles
-//!     (risk budgets) vs a perfect-knowledge oracle.
+//!     (risk budgets) vs bias-corrected prediction vs a perfect-knowledge
+//!     oracle (bias-corrected subset also in `e1b_bias_corrected.csv`).
 //! E2  time-varying capacity: power cap and carbon windows, planner-aware vs
 //!     planner-unaware.
 //! E3  shadow mode on live traffic.
 
 use gnomon_core::{CapacityProfile, Job, JobId, Resources};
-use gnomon_sched::{BackfillPolicy, Policy, QuantileEstimator, RuntimeEstimator, ShadowPolicy};
+use gnomon_sched::{
+    BackfillPolicy, BiasConfig, BiasCorrectedEstimator, GuardMode, Policy, QuantileEstimator,
+    RuntimeEstimator, ShadowPolicy,
+};
 use gnomon_sim::{metrics, replay, swf, Machine, SimJob, Simulator};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -40,6 +45,42 @@ fn quantile_policy(theta: f64, history: &[SimJob]) -> Arc<dyn Policy> {
     Arc::new(BackfillPolicy::with_estimator(WINDOW_SECS, est))
 }
 
+fn bias_policy(cfg: BiasConfig, history: &[SimJob]) -> Arc<dyn Policy> {
+    let est = Arc::new(BiasCorrectedEstimator::new(cfg));
+    for h in history {
+        est.observe(&h.job, h.actual);
+    }
+    Arc::new(BackfillPolicy::with_estimator(WINDOW_SECS, est))
+}
+
+/// Bias-corrected variants scored in E1: the selected default and ablations
+/// of its parts (cautious span, slip protection, guard mode, wide jobs at
+/// walltime, planning level).
+fn bias_variants() -> Vec<BiasConfig> {
+    let d = BiasConfig::default();
+    vec![
+        d,
+        BiasConfig {
+            protect_slipped: false,
+            ..d
+        },
+        BiasConfig {
+            guard_tau: None,
+            protect_slipped: false,
+            ..d
+        },
+        BiasConfig {
+            guard_mode: GuardMode::Block,
+            ..d
+        },
+        BiasConfig {
+            wide_at_walltime: true,
+            ..d
+        },
+        BiasConfig { tau: 0.5, ..d },
+    ]
+}
+
 fn cores(c: u32) -> Resources {
     Resources {
         cores: c,
@@ -57,7 +98,16 @@ const CARBON: [f64; 24] = [
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    let only = match args.iter().position(|a| a == "--only") {
+        Some(i) if i + 1 < args.len() => {
+            let v = args.remove(i + 1);
+            args.remove(i);
+            Some(v)
+        }
+        _ => None,
+    };
+    let run = |e: &str| only.as_deref().is_none_or(|o| o == e);
     let dir = args
         .get(1)
         .expect("usage: experiments <swf-dir> <out-dir> [jobs]");
@@ -98,7 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     writeln!(md, "- windows: {n} consecutive jobs at offsets {offsets:?}; learned models warm-started on the preceding 2000 jobs\n").unwrap();
 
     // ---------------- E0: exact replay -----------------------------------
-    {
+    if run("e0") {
         let t = &traces[0];
         let w = t.window(offsets[0], n);
         let sim = Simulator::new(
@@ -166,9 +216,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ---------------- E1: distribution-aware backfill ---------------------
-    let mut csv = String::from("trace,offset,policy,jobs,mean_wait_h,p95_wait_h,mean_bsld,wide_wait_h,utilization,makespan_h,extensions_per_job,unplaced,sim_ms\n");
+    let header = "trace,offset,policy,jobs,mean_wait_h,p95_wait_h,mean_bsld,wide_wait_h,utilization,makespan_h,extensions_per_job,unplaced,sim_ms\n";
+    let mut csv = String::from(header);
+    let mut csv_b = String::from(header);
     let thetas = [0.5, 0.7, 0.9, 0.95];
-    for t in &traces {
+    for t in traces.iter().filter(|_| run("e1")) {
         for &off in &offsets {
             let w = t.window(off, n);
             let hist = t.history(off, 2000);
@@ -178,6 +230,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )];
             for &q in &thetas {
                 variants.push((format!("q{q:.2}"), quantile_policy(q, &hist)));
+            }
+            for cfg in bias_variants() {
+                let pol = bias_policy(cfg, &hist);
+                let label = pol.name().trim_start_matches("backfill/").to_string();
+                variants.push((label, pol));
             }
             let oracle = Oracle(w.iter().map(|s| (s.job.id, s.actual)).collect());
             variants.push((
@@ -194,8 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let r = sim.run(&w);
                 let ms = t0.elapsed().as_millis();
                 let s = metrics::summarize(&r, t.max_procs);
-                writeln!(
-                    csv,
+                let row = format!(
                     "{},{off},{label},{},{:.4},{:.4},{:.3},{:.4},{:.4},{:.2},{:.3},{},{ms}",
                     t.name,
                     s.jobs,
@@ -207,8 +263,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     s.makespan_h,
                     s.extensions_per_job,
                     s.unplaced
-                )
-                .unwrap();
+                );
+                writeln!(csv, "{row}").unwrap();
+                if ["walltime", "q0.70", "oracle"].contains(&label.as_str())
+                    || label.starts_with("bc")
+                {
+                    writeln!(csv_b, "{row}").unwrap();
+                }
                 eprintln!(
                     "E1 {} @{off} {label}: wait {:.2}h bsld {:.1} ({ms} ms)",
                     t.name, s.mean_wait_h, s.mean_bsld
@@ -216,11 +277,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    std::fs::write(format!("{out}/e1_runtime_quantiles.csv"), &csv).unwrap();
+    if run("e1") {
+        std::fs::write(format!("{out}/e1_runtime_quantiles.csv"), &csv)?;
+        std::fs::write(format!("{out}/e1b_bias_corrected.csv"), &csv_b)?;
+    }
 
     // ---------------- E2: time-varying capacity ---------------------------
     let mut csv2 = String::from("trace,offset,scenario,planner,jobs,mean_wait_h,mean_bsld,utilization,over_cap_core_h,peak_over_cap_cores,kg_co2,unplaced\n");
-    for t in &traces {
+    for t in traces.iter().filter(|_| run("e2")) {
         let p = t.max_procs;
         // Demand-response power cap: 60% of cores 16:00-20:00 UTC daily.
         let power = CapacityProfile::daily(vec![
@@ -275,10 +339,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    std::fs::write(format!("{out}/e2_capacity_profiles.csv"), &csv2).unwrap();
+    if run("e2") {
+        std::fs::write(format!("{out}/e2_capacity_profiles.csv"), &csv2)?;
+    }
 
     // ---------------- E3: shadow mode -------------------------------------
-    {
+    if run("e3") {
         let t = &traces[0];
         let w = t.window(offsets[0], n);
         let hist = t.history(offsets[0], 2000);
@@ -333,6 +399,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             agreement * 100.0
         );
     }
-    std::fs::write(format!("{out}/SUMMARY_raw.md"), md).unwrap();
+    if run("e0") || run("e3") {
+        std::fs::write(format!("{out}/SUMMARY_raw.md"), md)?;
+    }
     Ok(())
 }
