@@ -8,7 +8,9 @@
 #
 # Needs the Ubuntu/Debian packages `slurm-wlm` and `munge` (run as root: the daemons drop to the
 # `slurm` user). Env: SLURM_CORES (8: CPUs advertised for the node, matching local-cluster.sh's
-# GNOMON_CORES; may exceed the real core count), SLURM_MEM_MB (16384), SLURM_PARTITION (debug).
+# GNOMON_CORES; may exceed the real core count), SLURM_MEM_MB (16384), SLURM_PARTITION (debug),
+# SLURM_CONF_DIR (/etc/slurm). With a non-default SLURM_CONF_DIR, also export
+# SLURM_CONF=$SLURM_CONF_DIR/slurm.conf for run.sh so sbatch/squeue/scontrol use it.
 #
 # No slurmdbd: jobs stay queryable through `scontrol show job` for MinJobAge (1 h), which the test
 # kit falls back to when `sacct` has no accounting storage. This is a one-node Slurm, not a
@@ -16,6 +18,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 CONF_DIR=${SLURM_CONF_DIR:-/etc/slurm}
+# Every daemon and client started from here reads the file written below.
+export SLURM_CONF="$CONF_DIR/slurm.conf"
 STATE=/var/spool/slurmctld
 SPOOL=/var/spool/slurmd
 LOGS=${SLURM_LOG_DIR:-/var/log/slurm}
@@ -84,5 +88,5 @@ case ${1:-} in
   start) start ;;
   stop) stop ;;
   status) sinfo && squeue ;;
-  *) sed -n 2,16p "$0"; exit 2 ;;
+  *) sed -n 2,17p "$0"; exit 2 ;;
 esac

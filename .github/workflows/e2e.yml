@@ -3,8 +3,9 @@ name: End-to-end
 # Runs the scheduler test kit (testkit/) against a real Gnomon controller and agents.
 #
 #   pull_request / push to main   Gnomon only, --quick (durations x0.25), all seven tests
-#   schedule / workflow_dispatch  the same suite at full length against Gnomon AND a single-node
-#                                 Slurm on the same runner, then testkit/compare.py side by side
+#   schedule / workflow_dispatch  the same suite at full length against Gnomon and then a
+#                                 single-node Slurm, sequentially in ONE job (same VM, same
+#                                 hardware and load), then testkit/compare.py side by side
 on:
   push:
     branches:
@@ -14,10 +15,6 @@ on:
     - cron: "41 3 * * 2"
   workflow_dispatch:
     inputs:
-      slurm:
-        description: "Also run the suite against a single-node Slurm and compare"
-        type: boolean
-        default: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -42,7 +39,8 @@ jobs:
         run: shellcheck -x testkit/*.sh testkit/jobs/*.sh
 
   gnomon:
-    name: Test kit (Gnomon${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' && ', full length' || ', quick' }})
+    name: Test kit (Gnomon, quick)
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -73,10 +71,7 @@ jobs:
           GNOMON_BIN="$PWD/target/release" testkit/local-cluster.sh start
 
       - name: Run the test kit
-        run: |
-          quick=--quick
-          if [ "${{ github.event_name }}" = schedule ] || [ "${{ github.event_name }}" = workflow_dispatch ]; then quick=; fi
-          testkit/run.sh --backend gnomon $quick --burst 50
+        run: testkit/run.sh --backend gnomon --quick --burst 50
 
       - name: Stop the cluster
         if: always()
@@ -86,7 +81,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "## Test kit — Gnomon"
+            echo "## Test kit — Gnomon (quick)"
             echo
             echo '| test | result | detail |'
             echo '|---|---|---|'
@@ -103,12 +98,14 @@ jobs:
             testkit/out/*.log
           if-no-files-found: ignore
 
-  slurm:
-    name: Test kit (single-node Slurm, full length)
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.slurm)
+  side-by-side:
+    name: Gnomon vs Slurm (same runner, full length)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
+      GNOMON_CORES: "8"
+      GNOMON_MEM_MB: "16384"
       SLURM_CORES: "8"
       SLURM_MEM_MB: "16384"
       SLURM_PARTITION: debug
@@ -116,49 +113,61 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Slurm and munge
-        run: sudo apt-get update -q && sudo apt-get install -y -q slurm-wlm munge
+      - name: Install protoc, Slurm and munge
+        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler slurm-wlm munge
 
-      - name: Start a single-node Slurm
-        run: sudo -E testkit/slurm-local.sh start
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Run the test kit
-        run: testkit/run.sh --backend slurm --burst 50
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+          save-if: false
+
+      - name: Build controller, agent and CLI
+        run: cargo build --release --locked -p gnomon-ctl -p gnomon-agent -p gnomon-cli
+
+      # Both schedulers run one after the other on this VM, never concurrently.
+      - name: Gnomon, full length
+        run: |
+          export PATH="$PWD/target/release:$PATH"
+          GNOMON_BIN="$PWD/target/release" testkit/local-cluster.sh start
+          status=0
+          testkit/run.sh --backend gnomon --burst 50 || status=$?
+          testkit/local-cluster.sh stop
+          readlink -f testkit/out/current > gnomon-run.txt
+          exit "$status"
+
+      - name: Slurm (single node), full length
+        if: always()
+        run: |
+          sudo -E testkit/slurm-local.sh start
+          status=0
+          testkit/run.sh --backend slurm --burst 50 || status=$?
+          sudo -E testkit/slurm-local.sh stop
+          readlink -f testkit/out/current > slurm-run.txt
+          exit "$status"
 
       - name: Slurm logs
         if: failure()
         run: sudo tail -n 100 /var/log/slurm/slurmctld.log /var/log/slurm/slurmd.log || true
 
+      - name: Compare runs
+        if: always()
+        run: |
+          if [ ! -s gnomon-run.txt ] || [ ! -s slurm-run.txt ]; then echo "a run is missing"; exit 1; fi
+          python3 testkit/compare.py "$(cat gnomon-run.txt)" "$(cat slurm-run.txt)" \
+            | tee comparison.md >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: testkit-slurm
-          path: testkit/out/slurm-*
+          name: testkit-side-by-side
+          path: |
+            testkit/out/gnomon-*
+            testkit/out/slurm-*
+            testkit/out/*.log
+            comparison.md
           if-no-files-found: ignore
-
-  compare:
-    name: Gnomon vs Slurm
-    needs: [gnomon, slurm]
-    if: always() && needs.gnomon.result != 'skipped' && needs.slurm.result != 'skipped'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download results
-        uses: actions/download-artifact@v4
-        with:
-          path: runs
-
-      - name: Compare runs
-        run: |
-          g=$(find runs/testkit-gnomon -maxdepth 1 -type d -name 'gnomon-*' | head -1)
-          s=$(find runs/testkit-slurm -maxdepth 1 -type d -name 'slurm-*' | head -1)
-          python3 testkit/compare.py "$g" "$s" | tee comparison.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload comparison
-        uses: actions/upload-artifact@v4
-        with:
-          name: testkit-comparison
-          path: comparison.md

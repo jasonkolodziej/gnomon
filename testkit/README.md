@@ -50,6 +50,6 @@ GNOMON_CORES=8 ./local-cluster.sh start
 ```
 
 There is no `slurmdbd`, so `sacct` has no data; the kit reads finished jobs from `scontrol show job`
-(kept for `MinJobAge`). CI runs exactly this weekly and on demand (`.github/workflows/e2e.yml`, job
+(kept for `MinJobAge`). CI runs exactly this, both schedulers sequentially in one job on the same runner, weekly and on demand (`.github/workflows/e2e.yml`, job
 *Gnomon vs Slurm*) and runs the quick Gnomon suite on every pull request. A one-node Slurm compares
 scheduler behaviour and latency, not scale or multi-node placement.
