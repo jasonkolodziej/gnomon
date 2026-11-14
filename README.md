@@ -139,10 +139,14 @@ gntop                            # live Gantt chart of the plan (q quits)
 Each job runs as `sh -c <command>` in the agent's working directory (`GNOMON_WORKDIR` overrides it)
 with `GNOMON_JOB_ID`, `GNOMON_JOB_NAME`, `GNOMON_CPUS`, `GNOMON_MEM_MB`, `GNOMON_GPUS`,
 `GNOMON_TIME_LIMIT`, `GNOMON_NODELIST` (comma-separated), `GNOMON_NODE_RANK`, `GNOMON_NNODES` and
-`GNOMON_JOB_START` (the gang's common planned start). A gang's nodes are reserved together from
-that start, but each rank launches on its agent's next poll, so ranks start within one poll
-interval (`GNOMON_HEARTBEAT_SECS`) of each other; as with `srun`, an MPI launcher's own wire-up (PMI)
-is the synchronization point. A controller-side release barrier is future work.
+`GNOMON_JOB_START` (the gang's common planned start).
+
+**Gang release barrier.** Agents fetch a gang's ranks on independent polls, so a rank could start up to
+one poll interval (`GNOMON_HEARTBEAT_SECS`) before its peers. Instead each rank waits at a barrier:
+fetching a rank is recorded by the replicated `AssignmentsFetched` event, the controller's `GangReady`
+RPC reports when every rank has been fetched, and waiting ranks poll it every 200 ms and then start.
+Measured with two agents polling 1.5 s out of phase: ranks started 0.14 s apart. A rank whose job is
+no longer running is not started; one whose peers never arrive gives up at its walltime (exit 125).
 At the walltime it is killed and reported as exit 124, like `timeout(1)`.
 
 **cgroup v2 confinement.** When the agent can write a cgroup2 hierarchy offering the `cpu` and `memory`
@@ -162,16 +166,18 @@ cgroup cannot be created, that job fails (exit -1) rather than running without i
 Without cgroup2 (a v1 host, no delegation, missing controllers) the agent logs the reason once at
 start-up and runs jobs unconfined.
 
-> [!WARNING]
-> **Jobs run with the agent's privileges.** Unlike slurmd, the agent does not yet switch to the
-> submitting user before `exec` (no privilege-separated launch). Do **not** run it as root on a
-> shared machine: every host job would run as root and could rewrite its own cgroup limits or worse.
-> Run it as an unprivileged service user with a delegated cgroup subtree instead.
+**Privilege separation.** Like slurmd, an agent running as **root** runs every job as the user who
+submitted it: the job's `user` is resolved to a local account (`getpwnam`/`getgrouplist`, so NSS/LDAP
+accounts work) in the agent, and the child joins its cgroup and then drops to that user's groups, gid
+and uid before `exec`. The job therefore cannot change its own cgroup limits, which stay root-owned. A
+job whose user has no local account, or is `root`, is refused (exit -1): jobs never run as root.
+Container jobs under a root agent get `--user <job uid>:<job gid>`. The job user needs read access to
+the job script and the working directory (`GNOMON_WORKDIR`, ideally a shared filesystem).
 
-The recommended deployment is that unprivileged agent: a systemd unit with `Delegate=yes` whose
-delegated subtree contains both the agent's own cgroup and `GNOMON_CGROUP_ROOT` (moving a process
-requires write access to `cgroup.procs` of the common ancestor; the root itself must hold no
-processes).
+An **unprivileged** agent cannot switch users, so its jobs run as the agent's service user. That also
+works with cgroups through a delegated subtree: a systemd unit with `Delegate=yes` whose delegated
+subtree contains both the agent's own cgroup and `GNOMON_CGROUP_ROOT` (moving a process requires write
+access to `cgroup.procs` of the common ancestor; the root itself must hold no processes).
 
 **Rootless containers.** A job submitted with an image (`gnbatch --container IMAGE`, or
 `#SBATCH --container=IMAGE` / pyxis's `--container-image=IMAGE`) runs as
@@ -208,7 +214,7 @@ output, without ever being host root:
 | Runtime | `--user` | Why |
 |---|---|---|
 | Rootless Docker | `0:0` | Container root *is* the agent's user on the host; any other uid maps to a subordinate uid that cannot write an agent-owned directory |
-| Rootful Docker | agent's `uid:gid` | Container root would be host root |
+| Rootful Docker | agent's `uid:gid`; the **job user's** under a root agent | Container root would be host root |
 | Podman | agent's `uid:gid` + `--userns=keep-id` | `keep-id` maps the agent's uid to itself |
 
 Rootless Docker is detected once at start-up from `docker info`; `GNOMON_CONTAINER_ROOTLESS=1`/`0`

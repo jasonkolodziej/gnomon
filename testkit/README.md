@@ -30,6 +30,10 @@ Results land in `out/<backend>-<timestamp>/` (`summary.tsv`, `metrics.tsv`, raw 
 `run.sh` exits non-zero if any test fails. Full guide: "Gnomon — Install, Usage & Slurm Comparison
 Test Plan".
 
+Run the kit as an ordinary user. If `local-cluster.sh` runs as root, the agents run each job as its
+submitting user (`$USER`) and refuse `root`, as slurmd does; submit as a non-root user whose account can
+read the kit (`USER=<name>`, kit on a readable path).
+
 ## Side by side on one machine
 
 No Slurm cluster at hand? `slurm-local.sh` starts a single-node Slurm (slurmctld + slurmd + munge, from
