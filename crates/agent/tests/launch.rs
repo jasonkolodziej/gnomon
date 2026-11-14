@@ -17,6 +17,7 @@ fn spec(command: &str, walltime_secs: u64) -> LaunchSpec {
         container: None,
         nodelist: vec!["local".into()],
         rank: 0,
+        start: 0,
         workdir: std::env::temp_dir(),
     }
 }

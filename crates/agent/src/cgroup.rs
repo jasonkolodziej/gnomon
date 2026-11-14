@@ -1,6 +1,7 @@
 //! cgroup v2 job confinement (report section 4.6, "cgroup confinement").
 //!
-//! Each job gets its own cgroup `<root>/gnomon/job_<id>` with
+//! Each job rank gets its own cgroup `<root>/gnomon/job_<id>_r<rank>` (ranks
+//! of a gang stay distinct when several agents share one host) with
 //! `cpu.max` = cores x period, `memory.max` = the requested memory and
 //! `memory.swap.max` = 0, the slurmd `proctrack/cgroup` + `task/cgroup`
 //! equivalent. Every path is derived from an injected root so the unit tests
@@ -107,14 +108,14 @@ impl Cgroups {
         self.root.join("gnomon")
     }
 
-    /// `<root>/gnomon/job_<id>`.
-    pub fn job_path(&self, job_id: u64) -> PathBuf {
-        self.base().join(format!("job_{job_id}"))
+    /// `<root>/gnomon/job_<id>_r<rank>`.
+    pub fn job_path(&self, job_id: u64, rank: u32) -> PathBuf {
+        self.base().join(format!("job_{job_id}_r{rank}"))
     }
 
-    /// Create the job's cgroup and write its limits.
-    pub fn create(&self, job_id: u64, limits: &Limits) -> io::Result<JobCgroup> {
-        let path = self.job_path(job_id);
+    /// Create the cgroup of one job rank and write its limits.
+    pub fn create(&self, job_id: u64, rank: u32, limits: &Limits) -> io::Result<JobCgroup> {
+        let path = self.job_path(job_id, rank);
         match fs::create_dir(&path) {
             Err(e) if e.kind() != ErrorKind::AlreadyExists => return Err(e),
             _ => {}
@@ -406,13 +407,14 @@ pub(crate) mod tests {
         let job = cg
             .create(
                 7,
+                0,
                 &Limits {
                     cores: 2,
                     mem_mb: 512,
                 },
             )
             .unwrap();
-        assert_eq!(job.path(), t.0.join("gnomon/job_7"));
+        assert_eq!(job.path(), t.0.join("gnomon/job_7_r0"));
         assert_eq!(read(&job.path().join("cpu.max")), "200000 100000");
         assert_eq!(read(&job.path().join("memory.max")), "536870912");
         assert_eq!(read(&job.path().join("memory.swap.max")), "0");
@@ -425,6 +427,7 @@ pub(crate) mod tests {
         let job = cg
             .create(
                 8,
+                0,
                 &Limits {
                     cores: 1,
                     mem_mb: 0,
@@ -436,12 +439,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn gang_ranks_on_one_host_get_separate_cgroups() {
+        let t = fake_root("cpu memory");
+        let cg = Cgroups::detect(&t.0).unwrap();
+        let lim = Limits {
+            cores: 2,
+            mem_mb: 0,
+        };
+        let r0 = cg.create(12, 0, &lim).unwrap();
+        let r1 = cg.create(12, 1, &lim).unwrap();
+        assert_ne!(r0.path(), r1.path());
+        r0.remove().unwrap();
+        assert!(r1.path().exists(), "removing one rank leaves the other");
+    }
+
+    #[test]
     fn remove_deletes_job_cgroup() {
         let t = fake_root("cpu memory");
         let cg = Cgroups::detect(&t.0).unwrap();
         let job = cg
             .create(
                 9,
+                0,
                 &Limits {
                     cores: 1,
                     mem_mb: 64,
@@ -449,7 +468,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         job.remove().unwrap();
-        assert!(!cg.job_path(9).exists());
+        assert!(!cg.job_path(9, 0).exists());
         assert!(cg.base().exists());
         // Removing twice is fine.
         job.remove().unwrap();
@@ -462,6 +481,7 @@ pub(crate) mod tests {
         let job = cg
             .create(
                 10,
+                0,
                 &Limits {
                     cores: 1,
                     mem_mb: 0,
@@ -481,6 +501,7 @@ pub(crate) mod tests {
         let job = cg
             .create(
                 11,
+                0,
                 &Limits {
                     cores: 1,
                     mem_mb: 0,

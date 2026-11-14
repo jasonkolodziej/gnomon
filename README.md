@@ -56,7 +56,7 @@ Evaluated on real Parallel Workloads Archive traces — full write-up in
 | **Per-vertex optimistic concurrency.** A plan conflicts only if a vertex it uses changed *and* it no longer fits (was: any event, even a heartbeat). Also fixes rejected plans counted as committed and double placement of one job. | On | 92–100% fewer conflicts, 1.15–1.99× controller throughput |
 | **Exact replay + counterfactuals + shadow mode.** Journal → bit-identical state; recovered history re-scheduled under any policy with the production code; candidate policies run alongside the live one. | Tooling | 5,000-job trace: replay exact, same policy reproduces every start time |
 | **Distribution-aware backfill.** Spans planned at a learned runtime quantile (risk budget); overruns extended, walltime still the kill limit. | Opt-in | Oracle bound: −16% wait, −29% slowdown. Per-user quantile: inconsistent (median −3% wait at θ=0.7, range −15…+21%). New `BiasCorrectedEstimator` (pinball-loss bias correction + reservation protection): lower mean wait in 9/9 windows (median −10%, −20% slowdown), but wide jobs wait longer in 4/9, so walltime stays default |
-| **Multi-node gang jobs.** `gnbatch -N 4` / `#SBATCH --nodes=4`: the per-node request is placed on N distinct nodes with one common start (all-or-nothing, oracle-tested `match_gang`), in both the start-now and reservation paths; agents get ranked assignments with the nodelist, and the FSM aggregates per-rank completions so replay stays exact. | On (`-N` defaults to 1) | Mixed 16-node simulation: no node oversubscribed, gang ranks start together, full-machine gang not starved under conservative backfill |
+| **Multi-node gang jobs.** `gnbatch -N 4` / `#SBATCH --nodes=4`: the per-node request is placed on N distinct nodes reserved from one common planned start (all-or-nothing, oracle-tested `match_gang`), in both the start-now and reservation paths; agents get ranked assignments with the nodelist (each rank launches on its agent's next poll), and the FSM aggregates per-rank completions so replay stays exact. | On (`-N` defaults to 1) | Mixed 16-node simulation: no node oversubscribed, gang ranks start together, full-machine gang not starved under conservative backfill |
 | **Durable controller state + on-disk Raft storage.** `gnomon-ctl --state-dir DIR` journals every event to a checksummed, fsync'd write-ahead log and restores jobs, nodes and reservations on restart; `DiskStore` persists openraft's log, vote, commit point and snapshots with torn-tail recovery. | Opt-in (`--state-dir`) | Restart tests: identical state fingerprint after recovery; a real single-node openraft instance commits, restarts and resumes |
 | **cgroup v2 confinement + rootless containers.** Each job gets `cpu.max`/`memory.max` in its own cgroup (joined before `exec`, killed with `cgroup.kill`), or runs under rootless Docker/Podman with `--container IMAGE`; `GNOMON_NODELIST`/`GNOMON_NODE_RANK` for gangs. | On when cgroup2 is writable; containers per job | Tested against a fake cgroupfs and a fake `docker`; falls back to unconfined launches on cgroup v1 hosts |
 | **`gntop`.** Live Gantt TUI of every node's planner: running spans, backfill reservations, the pending queue. | Tool | Render-tested on ratatui's `TestBackend`; `--once` for CI and screenshots |
@@ -129,7 +129,7 @@ CI installs `protoc` from `protobuf-compiler`; do the same locally (or set `PROT
 gnomon-ctl &                     # gRPC on :7631; add --state-dir DIR (or GNOMON_STATE_DIR) to survive restarts
 GNOMON_NODE=node0 gnomon-agent & # registers real hardware, heartbeats, executes jobs
 gnbatch --name train -c 8 --gpus 2 -t 3600 train.sh arg1     # parses #SBATCH too; flags win
-gnbatch -N 4 -c 16 -t 3600 mpi.sh # gang: 16 CPUs on each of 4 nodes, same start
+gnbatch -N 4 -c 16 -t 3600 mpi.sh # gang: 16 CPUs on each of 4 nodes, reserved together
 gnqueue; gninfo; gncancel 3
 gntop                            # live Gantt chart of the plan (q quits)
 ```
@@ -138,15 +138,21 @@ gntop                            # live Gantt chart of the plan (q quits)
 
 Each job runs as `sh -c <command>` in the agent's working directory (`GNOMON_WORKDIR` overrides it)
 with `GNOMON_JOB_ID`, `GNOMON_JOB_NAME`, `GNOMON_CPUS`, `GNOMON_MEM_MB`, `GNOMON_GPUS`,
-`GNOMON_TIME_LIMIT`, `GNOMON_NODELIST` (comma-separated), `GNOMON_NODE_RANK` and `GNOMON_NNODES`.
+`GNOMON_TIME_LIMIT`, `GNOMON_NODELIST` (comma-separated), `GNOMON_NODE_RANK`, `GNOMON_NNODES` and
+`GNOMON_JOB_START` (the gang's common planned start). A gang's nodes are reserved together from
+that start, but each rank launches on its agent's next poll, so ranks start within one poll
+interval (`GNOMON_HEARTBEAT_SECS`) of each other; as with `srun`, an MPI launcher's own wire-up (PMI)
+is the synchronization point. A controller-side release barrier is future work.
 At the walltime it is killed and reported as exit 124, like `timeout(1)`.
 
 **cgroup v2 confinement.** When the agent can write a cgroup2 hierarchy offering the `cpu` and `memory`
-controllers, every job gets `<root>/gnomon/job_<id>` with `cpu.max` = cores × 100 ms per 100 ms,
+controllers, every job rank gets `<root>/gnomon/job_<id>_r<rank>` (so gang ranks stay separate when
+several agents share a host) with `cpu.max` = cores × 100 ms per 100 ms,
 `memory.max` = the requested memory (if any) and `memory.swap.max` = 0. The child joins the cgroup
 itself before `exec`, so no job process ever runs unconfined. The walltime kill uses `cgroup.kill`
 (Linux 5.14+) to kill the whole process tree. On exit the agent prints the job's CPU time and peak
-memory (`cpu.stat`, `memory.peak`) and removes the cgroup.
+memory (`cpu.stat`, `memory.peak`) and removes the cgroup. If confinement is available but a job's
+cgroup cannot be created, that job fails (exit -1) rather than running without its limits.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -154,22 +160,32 @@ memory (`cpu.stat`, `memory.peak`) and removes the cgroup.
 | `GNOMON_CGROUP` | on | `off` disables confinement |
 
 Without cgroup2 (a v1 host, no delegation, missing controllers) the agent logs the reason once at
-start-up and runs jobs unconfined. Running the agent as root (as slurmd runs) needs no setup. An
-unprivileged agent needs a delegated subtree (a systemd unit with `Delegate=yes`) that contains both
-the agent's own cgroup and `GNOMON_CGROUP_ROOT`, because moving a process requires write access to
-`cgroup.procs` of the common ancestor; the root itself must hold no processes.
+start-up and runs jobs unconfined.
+
+> [!WARNING]
+> **Jobs run with the agent's privileges.** Unlike slurmd, the agent does not yet switch to the
+> submitting user before `exec` (no privilege-separated launch). Do **not** run it as root on a
+> shared machine: every host job would run as root and could rewrite its own cgroup limits or worse.
+> Run it as an unprivileged service user with a delegated cgroup subtree instead.
+
+The recommended deployment is that unprivileged agent: a systemd unit with `Delegate=yes` whose
+delegated subtree contains both the agent's own cgroup and `GNOMON_CGROUP_ROOT` (moving a process
+requires write access to `cgroup.procs` of the common ancestor; the root itself must hold no
+processes).
 
 **Rootless containers.** A job submitted with an image (`gnbatch --container IMAGE`, or
 `#SBATCH --container=IMAGE` / pyxis's `--container-image=IMAGE`) runs as
 
 ```text
-docker run --rm --name gnomon-job-<id> --cpus <cores> --memory <mem>m [--gpus <n>] --network host \
-  --user <uid>:<gid> -v <workdir>:<workdir> -w <workdir> -e GNOMON_...=... \
+docker run --rm --name gnomon-job-<id>-r<rank> --cpus <cores> --memory <mem>m [--gpus <n>] --network host \
+  --user <identity> -v <workdir>:<workdir> -w <workdir> -e GNOMON_...=... \
   --entrypoint sh <image> -c <command>
 ```
 
 The runtime enforces the limits, so the agent does not also put the job in a gnomon cgroup. The
-walltime kill runs `docker kill gnomon-job-<id>`, which stops the container, not just the client.
+walltime kill runs `docker kill gnomon-job-<id>-r<rank>`, which stops the container, not just the
+client; each call is time-bounded and its exit status checked, with a retry and `docker rm -f` as the
+fallback (a failure to confirm the stop is logged loudly).
 Scripts given by absolute path must live under the working directory (ideally a shared
 filesystem), since only that directory is mounted.
 
@@ -186,9 +202,17 @@ loginctl enable-linger $USER                    # keep the daemon running withou
 
 `--cpus`/`--memory` need cgroup v2 with the `cpu` and `memory` controllers delegated to the user
 (`systemctl edit user@.service` with `Delegate=cpu cpuset io memory pids` on older distributions).
-Under rootless Docker, container root maps to the agent's user, while `--user <uid>:<gid>` maps to a
-subordinate uid, so files the job writes to the bind mount belong to that subuid. Use Podman with
-`--userns=keep-id` (automatic here) when output ownership matters.
+The `--user` identity is chosen so the job can write the agent's working directory and owns its
+output, without ever being host root:
+
+| Runtime | `--user` | Why |
+|---|---|---|
+| Rootless Docker | `0:0` | Container root *is* the agent's user on the host; any other uid maps to a subordinate uid that cannot write an agent-owned directory |
+| Rootful Docker | agent's `uid:gid` | Container root would be host root |
+| Podman | agent's `uid:gid` + `--userns=keep-id` | `keep-id` maps the agent's uid to itself |
+
+Rootless Docker is detected once at start-up from `docker info`; `GNOMON_CONTAINER_ROOTLESS=1`/`0`
+overrides the detection.
 
 ### `gntop`: the time axis, live
 

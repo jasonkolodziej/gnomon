@@ -11,11 +11,17 @@ use gnomon_api::pb::fetch_work_reply::Assignment;
 use std::io::{self, Write};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 /// Exit code reported when the walltime kills a job (as `timeout(1)`).
 pub const TIMEOUT_EXIT: i32 = 124;
+
+/// After a successful tree/container kill, how long to wait for the direct
+/// child (the job shell or the `docker run` client) to exit before SIGKILL.
+const KILL_GRACE: Duration = Duration::from_secs(30);
+/// Bound on one `docker kill` / `docker rm -f` invocation.
+const RUNTIME_CMD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Everything the agent needs to start one job.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +40,10 @@ pub struct LaunchSpec {
     pub nodelist: Vec<String>,
     /// This node's index in `nodelist`.
     pub rank: u32,
+    /// Planned start shared by every rank (Unix seconds). Ranks are launched
+    /// on each agent's next poll, so they start within one poll interval of
+    /// each other; the job sees this common reference as `GNOMON_JOB_START`.
+    pub start: u64,
     /// Working directory (bind-mounted into containers).
     pub workdir: PathBuf,
 }
@@ -59,6 +69,7 @@ impl LaunchSpec {
             container: Some(a.container.clone()).filter(|c| !c.is_empty()),
             nodelist,
             rank: a.rank,
+            start: a.start,
             workdir,
         }
     }
@@ -75,6 +86,7 @@ impl LaunchSpec {
             ("GNOMON_NODELIST", self.nodelist.join(",")),
             ("GNOMON_NODE_RANK", self.rank.to_string()),
             ("GNOMON_NNODES", self.nodelist.len().max(1).to_string()),
+            ("GNOMON_JOB_START", self.start.to_string()),
         ]
     }
 
@@ -138,16 +150,27 @@ impl Launcher {
     }
 
     fn run_host(&self, spec: &LaunchSpec) -> Outcome {
-        let cg = self
-            .cgroups
-            .as_ref()
-            .and_then(|c| match c.create(spec.job_id, &spec.limits()) {
+        // Confinement was available at start-up, so a per-job setup failure
+        // fails the job rather than running it without the limits the
+        // scheduler reserved. Unconfined runs happen only when cgroups were
+        // unavailable or disabled for the whole node.
+        let cg = match &self.cgroups {
+            None => None,
+            Some(c) => match c.create(spec.job_id, spec.rank, &spec.limits()) {
                 Ok(j) => Some(j),
                 Err(e) => {
-                    eprintln!("job {}: cgroup setup failed ({e}); unconfined", spec.job_id);
-                    None
+                    eprintln!(
+                        "job {} rank {}: cgroup setup failed ({e}); not running it unconfined",
+                        spec.job_id, spec.rank
+                    );
+                    return Outcome {
+                        exit_code: -1,
+                        timed_out: false,
+                        usage: None,
+                    };
                 }
-            });
+            },
+        };
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
             .arg(&spec.command)
@@ -185,18 +208,7 @@ impl Launcher {
         let child = Command::new(&argv[0]).args(&argv[1..]).spawn();
         let (exit_code, timed_out) = match child {
             Ok(child) => wait_with_walltime(child, spec.walltime_secs, self.poll, || {
-                // Stop the container itself: killing only the client would
-                // leave the job running under the daemon.
-                let kill = container::kill_argv(&self.runtime, spec.job_id);
-                if let Err(e) = Command::new(&kill[0])
-                    .args(&kill[1..])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                {
-                    eprintln!("job {}: {} kill failed: {e}", spec.job_id, kill[0]);
-                }
-                false
+                stop_container(&self.runtime, spec.job_id, spec.rank)
             }),
             Err(e) => {
                 eprintln!("job {}: {} failed to start: {e}", spec.job_id, argv[0]);
@@ -209,6 +221,35 @@ impl Launcher {
             usage: None,
         }
     }
+}
+
+/// Stop the job's container at the walltime: killing only the `docker run`
+/// client would leave the job running under the daemon. Each runtime call is
+/// bounded and its exit status checked; `kill` is retried, then `rm -f` is the
+/// fallback. Returns whether the container is confirmed stopped (the caller
+/// then waits a bounded grace period for the client to exit).
+fn stop_container(rt: &ContainerRuntime, job_id: u64, rank: u32) -> bool {
+    let attempts = [
+        container::kill_argv(rt, job_id, rank),
+        container::kill_argv(rt, job_id, rank),
+        container::rm_argv(rt, job_id, rank),
+    ];
+    for argv in &attempts {
+        match container::run_bounded(argv, RUNTIME_CMD_TIMEOUT) {
+            Ok(st) if st.success() => return true,
+            Ok(st) => eprintln!(
+                "job {job_id} rank {rank}: `{}` exited {st}",
+                argv[1..].join(" ")
+            ),
+            Err(e) => eprintln!("job {job_id} rank {rank}: `{}`: {e}", argv[1..].join(" ")),
+        }
+    }
+    eprintln!(
+        "job {job_id} rank {rank}: could NOT confirm the container stopped; it may still be \
+         running under the {} daemon",
+        rt.bin
+    );
+    false
 }
 
 /// Spawn `cmd` with the child already inside the job cgroup.
@@ -246,9 +287,15 @@ fn wait_with_walltime(
             Err(_) => return (-1, false),
         }
         if limit.is_some_and(|l| Instant::now() >= l) {
-            if !kill_tree() {
-                let _ = child.kill();
+            if kill_tree() {
+                // The tree is dead; give the direct child a bounded grace
+                // period to notice before SIGKILLing it too.
+                let grace = Instant::now() + KILL_GRACE;
+                while matches!(child.try_wait(), Ok(None)) && Instant::now() < grace {
+                    std::thread::sleep(poll);
+                }
             }
+            let _ = child.kill();
             let _ = child.wait();
             return (TIMEOUT_EXIT, true);
         }
@@ -320,11 +367,17 @@ mod tests {
         a.container = "alpine:3.20".into();
         a.nodelist = vec!["n0".into(), "n1".into(), "n2".into()];
         a.rank = 2;
+        a.start = 1_794_613_465;
         let s = LaunchSpec::from_assignment(&a, "n2", PathBuf::from("/w"));
         assert_eq!(s.container.as_deref(), Some("alpine:3.20"));
         assert_eq!(env_of(&s, "GNOMON_NODELIST"), "n0,n1,n2");
         assert_eq!(env_of(&s, "GNOMON_NODE_RANK"), "2");
         assert_eq!(env_of(&s, "GNOMON_NNODES"), "3");
+        assert_eq!(
+            env_of(&s, "GNOMON_JOB_START"),
+            "1794613465",
+            "common reference"
+        );
     }
 
     #[test]
@@ -347,6 +400,7 @@ mod tests {
         let job = cg
             .create(
                 5,
+                0,
                 &Limits {
                     cores: 2,
                     mem_mb: 256,
@@ -362,7 +416,22 @@ mod tests {
         assert!(!out.timed_out);
         assert_eq!(out.usage, Some(Usage::default()));
         assert_eq!(std::fs::read_to_string(&witness).unwrap(), "0");
-        assert!(!cg.job_path(5).exists(), "job cgroup removed after exit");
+        assert!(!cg.job_path(5, 0).exists(), "job cgroup removed after exit");
+    }
+
+    #[test]
+    fn cgroup_setup_failure_fails_the_job_instead_of_running_unconfined() {
+        let t = fake_root("cpu memory");
+        let cg = Cgroups::detect(&t.0).unwrap();
+        // A plain file where the job cgroup directory must go: create fails.
+        std::fs::write(cg.job_path(5, 0), "").unwrap();
+        let marker = t.0.join("ran");
+        let mut a = assignment();
+        a.command = format!("touch {}", marker.display());
+        let spec = LaunchSpec::from_assignment(&a, "n0", std::env::temp_dir());
+        let out = launcher(Some(cg)).run(&spec);
+        assert_eq!(out.exit_code, -1);
+        assert!(!marker.exists(), "the job must not run unconfined");
     }
 
     #[test]

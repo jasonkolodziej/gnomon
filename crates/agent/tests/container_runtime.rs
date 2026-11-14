@@ -10,13 +10,16 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// A fake `docker`: `run` sleeps when the command mentions "sleep", else
-/// exits 9; every call is appended to `calls.log` next to the script.
+/// exits 9; `kill` stops the sleeping "container" like a daemon would (its
+/// `run` client then exits), unless `kill-fails` exists, in which case kill
+/// and `rm -f` fail. Every call is appended to `calls.log` next to the script.
 const FAKE: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 echo "$*" >> "$dir/calls.log"
 case "$1" in
-  run) case "$*" in *sleep*) exec sleep 30 ;; esac; exit 9 ;;
-  kill) exit 0 ;;
+  run) case "$*" in *sleep*) echo $$ > "$dir/run.pid"; exec sleep 30 ;; esac; exit 9 ;;
+  kill|rm) [ -e "$dir/kill-fails" ] && exit 1
+           kill "$(cat "$dir/run.pid")"; exit 0 ;;
 esac
 "#;
 
@@ -32,6 +35,7 @@ fn spec(command: &str, walltime_secs: u64) -> LaunchSpec {
         container: Some("alpine:3.20".into()),
         nodelist: vec!["local".into()],
         rank: 0,
+        start: 0,
         workdir: std::env::temp_dir(),
     }
 }
@@ -60,12 +64,28 @@ fn container_jobs_run_through_runtime_and_walltime_kills_container() {
     assert_eq!(out.exit_code, TIMEOUT_EXIT);
     assert!(t0.elapsed() < Duration::from_secs(3));
 
+    // A kill the runtime refuses: two kills, the rm -f fallback, then the
+    // client is SIGKILLed anyway; still bounded and reported as a timeout.
+    std::fs::write(dir.join("kill-fails"), "").unwrap();
+    let t0 = Instant::now();
+    let out = l.run(&spec("sleep 30", 1));
+    assert_eq!(out.exit_code, TIMEOUT_EXIT);
+    assert!(t0.elapsed() < Duration::from_secs(5));
+
     let log = std::fs::read_to_string(dir.join("calls.log")).unwrap();
     let calls: Vec<&str> = log.lines().collect();
-    assert_eq!(calls.len(), 3, "{log}");
-    assert!(calls[0].starts_with("run --rm --name gnomon-job-77 --cpus 2 --gpus 1"));
+    assert_eq!(calls.len(), 7, "{log}");
+    assert!(calls[0].starts_with("run --rm --name gnomon-job-77-r0 --cpus 2 --gpus 1"));
     assert!(calls[0].contains("--user 1000:1000"));
     assert!(calls[0].ends_with("--entrypoint sh alpine:3.20 -c exit 0"));
-    assert_eq!(calls[2], "kill gnomon-job-77");
+    assert_eq!(calls[2], "kill gnomon-job-77-r0", "one kill stops it");
+    assert_eq!(
+        &calls[4..],
+        [
+            "kill gnomon-job-77-r0",
+            "kill gnomon-job-77-r0",
+            "rm -f gnomon-job-77-r0"
+        ]
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
