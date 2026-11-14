@@ -2,16 +2,22 @@
 //! under both the Raft [`DiskStore`](crate::disk::DiskStore) and the
 //! controller's [`EventJournal`](crate::journal::EventJournal).
 //!
-//! Every record is `len: u32 LE | crc32(payload): u32 LE | payload`.
+//! Every record is
+//! `len: u32 LE | crc32(payload): u32 LE | crc32(first 8 header bytes): u32 LE | payload`.
 //! Appends are `write_all` + `sync_data`, so a record that was acknowledged
 //! survives a crash. Recovery reads frames front to back:
 //!
-//! - a short header, a length running past end-of-file, or a checksum
-//!   mismatch on the **final** record is a torn tail (the crash interrupted
-//!   the last append): it is dropped and the file truncated back to the last
-//!   good frame;
-//! - a checksum mismatch on any **earlier** record is real corruption and an
-//!   error — silently skipping it would lose acknowledged, committed data.
+//! - the header carries its own checksum, so a length is trusted only when it
+//!   is intact; a corrupted length in an earlier record can then never pass
+//!   for an interrupted final append (which would truncate acknowledged
+//!   records after it);
+//! - a short header, an intact header whose length runs past end-of-file, a
+//!   damaged header followed only by zero bytes (what a crash can leave when
+//!   the file was extended but not written), or a payload checksum mismatch
+//!   on the **final** record is a torn tail: it is dropped and the file
+//!   truncated back to the last good frame;
+//! - any other damaged header or payload is real corruption and an error —
+//!   silently skipping it would lose acknowledged, committed data.
 //!
 //! Small single-record files (vote, metadata, snapshot) are replaced
 //! atomically with [`atomic_write`]: temp file + fsync + rename + fsync dir.
@@ -20,7 +26,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-const HEADER: usize = 8;
+const HEADER: usize = 12;
 
 /// IEEE CRC-32 (the zlib/Ethernet polynomial), bitwise: no table, no dep.
 pub fn crc32(data: &[u8]) -> u32 {
@@ -42,6 +48,8 @@ pub fn encode_frame(payload: &[u8]) -> io::Result<Vec<u8>> {
     let mut out = Vec::with_capacity(HEADER + payload.len());
     out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(&crc32(payload).to_le_bytes());
+    let header_crc = crc32(&out[..8]);
+    out.extend_from_slice(&header_crc.to_le_bytes());
     out.extend_from_slice(payload);
     Ok(out)
 }
@@ -76,8 +84,16 @@ pub fn scan(buf: &[u8]) -> io::Result<Scan> {
         if rest.len() < HEADER {
             return Ok(torn(frames, pos));
         }
-        let len = u32::from_le_bytes(rest[0..4].try_into().unwrap()) as usize;
-        let crc = u32::from_le_bytes(rest[4..8].try_into().unwrap());
+        let word = |i: usize| u32::from_le_bytes(rest[i..i + 4].try_into().unwrap());
+        if crc32(&rest[..8]) != word(8) {
+            if rest.iter().all(|&b| b == 0) {
+                return Ok(torn(frames, pos));
+            }
+            return Err(corrupt(format!(
+                "damaged record header at byte {pos} followed by data"
+            )));
+        }
+        let (len, crc) = (word(0) as usize, word(4));
         let Some(end) = HEADER.checked_add(len).filter(|&e| e <= rest.len()) else {
             return Ok(torn(frames, pos));
         };
@@ -108,6 +124,32 @@ fn torn(frames: Vec<Frame>, pos: usize) -> Scan {
         frames,
         good_len: pos as u64,
         torn_tail: true,
+    }
+}
+
+/// Take an exclusive, process-wide lock on `dir` (`dir/LOCK`) for as long as
+/// the returned file is open. Recovery and compaction rewrite the log, so two
+/// processes opening the same directory would lose acknowledged records; the
+/// second one fails here instead (`WouldBlock`). The OS releases the lock if
+/// the holder dies, so a crash never leaves the directory locked.
+pub fn lock_dir(dir: &Path) -> io::Result<File> {
+    let path = dir.join("LOCK");
+    let f = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)?;
+    match f.try_lock() {
+        Ok(()) => Ok(f),
+        Err(fs::TryLockError::WouldBlock) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!(
+                "{} is in use by another gnomon process (lock held on {})",
+                dir.display(),
+                path.display()
+            ),
+        )),
+        Err(fs::TryLockError::Error(e)) => Err(e),
     }
 }
 
@@ -352,7 +394,30 @@ mod tests {
         let s = scan(&buf).unwrap();
         assert!(s.torn_tail);
         assert_eq!(s.frames.len(), 1);
-        assert_eq!(s.good_len, 9);
+        assert_eq!(s.good_len, HEADER as u64 + 1);
+    }
+
+    #[test]
+    fn corrupted_interior_length_is_an_error_not_a_torn_tail() {
+        // Three records; the second one's length now points past end-of-file.
+        let mut buf = Vec::new();
+        for p in [&b"one"[..], b"two", b"three"] {
+            buf.extend_from_slice(&encode_frame(p).unwrap());
+        }
+        let second = HEADER + 3;
+        buf[second + 3] ^= 0x80; // high byte of the second record's length
+        let err = scan(&buf).expect_err("acknowledged records must not be truncated");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn zero_filled_tail_after_a_crash_is_torn() {
+        let mut buf = encode_frame(b"kept").unwrap();
+        buf.extend_from_slice(&[0u8; 40]);
+        let s = scan(&buf).unwrap();
+        assert!(s.torn_tail);
+        assert_eq!(s.frames.len(), 1);
+        assert_eq!(s.good_len, (HEADER + 4) as u64);
     }
 
     #[test]

@@ -113,6 +113,8 @@ pub struct DiskStore {
     last_applied: Option<LogId<NodeId>>,
     membership: Membership,
     snapshot: Arc<Mutex<Option<StoredSnapshot>>>,
+    /// Exclusive lock on `dir`, held for the store's lifetime.
+    _lock: std::fs::File,
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<Option<T>> {
@@ -134,6 +136,7 @@ impl DiskStore {
     pub fn open(dir: impl AsRef<Path>, fsm: Arc<Fsm>) -> io::Result<DiskStore> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
+        let lock = crate::wal::lock_dir(&dir)?;
         let vote = read_json::<Vote<NodeId>>(&dir.join(VOTE))?;
         let meta = read_json::<LogMeta>(&dir.join(META))?.unwrap_or_default();
         let snapshot = read_atomic(&dir.join(SNAPSHOT))?
@@ -165,6 +168,7 @@ impl DiskStore {
             last_applied: None,
             membership: Membership::default(),
             snapshot: Arc::new(Mutex::new(snapshot)),
+            _lock: lock,
         };
         store.recover_state_machine()?;
         Ok(store)
@@ -589,6 +593,18 @@ mod tests {
         buf[12] ^= 0x55; // inside the first record's payload
         std::fs::write(&p, buf).unwrap();
         assert!(DiskStore::open(&d.0, fresh_fsm()).is_err());
+    }
+
+    #[test]
+    fn a_store_directory_can_be_opened_by_one_store_at_a_time() {
+        let d = TestDir::new("disk-lock");
+        let first = DiskStore::open(&d.0, fresh_fsm()).unwrap();
+        let err = DiskStore::open(&d.0, fresh_fsm())
+            .err()
+            .expect("locked by the first store");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        drop(first);
+        assert!(DiskStore::open(&d.0, fresh_fsm()).is_ok());
     }
 
     #[tokio::test]

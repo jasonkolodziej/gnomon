@@ -14,7 +14,7 @@
 //! an empty journal — so startup cost is bounded by one run's worth of events.
 
 use crate::store::{image_bytes, FsmImage};
-use crate::wal::{atomic_write, data_err, read_atomic, FramedLog};
+use crate::wal::{atomic_write, data_err, lock_dir, read_atomic, FramedLog};
 use gnomon_core::{Clock, Event, StateIndex};
 use gnomon_fsm::{EventSink, Fsm, JournalEntry};
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,8 @@ pub struct Record {
 pub struct EventJournal {
     dir: PathBuf,
     log: Mutex<FramedLog>,
+    /// Exclusive lock on `dir`, held for the journal's (= the FSM's) lifetime.
+    _lock: std::fs::File,
 }
 
 impl EventJournal {
@@ -45,6 +47,9 @@ impl EventJournal {
     pub fn open_fsm(dir: impl AsRef<Path>, clock: Arc<dyn Clock>) -> io::Result<Arc<Fsm>> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
+        // Before reading anything: a second controller on the same directory
+        // must not recover and compact under the first one's feet.
+        let lock = lock_dir(&dir)?;
         let fsm = Arc::new(Fsm::with_clock(clock));
         if let Some(bytes) = read_atomic(&dir.join(STATE))? {
             let image: FsmImage = serde_json::from_slice(&bytes).map_err(data_err)?;
@@ -74,6 +79,7 @@ impl EventJournal {
         let journal = Arc::new(EventJournal {
             dir,
             log: Mutex::new(log),
+            _lock: lock,
         });
         if fsm.set_sink(journal).is_err() {
             unreachable!("fresh FSM has no sink");
@@ -195,6 +201,23 @@ mod tests {
         drop(fsm);
         let fsm = EventJournal::open_fsm(&d.0, clock).unwrap();
         assert_eq!(fingerprint(&fsm), fp);
+    }
+
+    #[test]
+    fn a_second_process_cannot_open_a_journal_in_use() {
+        let d = TestDir::new("journal-lock");
+        let clock = Arc::new(ManualClock::new(1000));
+        let first = EventJournal::open_fsm(&d.0, clock.clone()).unwrap();
+        drive(&first, &clock, 1..2);
+        let err = EventJournal::open_fsm(&d.0, clock.clone())
+            .err()
+            .expect("the directory is locked by the first controller");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        // The refused open must not have touched the first one's journal.
+        let (fp, idx) = (fingerprint(&first), first.index());
+        drop(first);
+        let again = EventJournal::open_fsm(&d.0, clock).unwrap();
+        assert_eq!((fingerprint(&again), again.index()), (fp, idx));
     }
 
     #[test]
