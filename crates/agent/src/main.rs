@@ -6,6 +6,7 @@
 //! container when the job names an image (CDI device injection is the next
 //! iteration; resource detection is real: /proc + nvidia-smi/rocm-smi probing).
 
+use gnomon_agent::barrier::{self, Release, BARRIER_POLL, BARRIER_TIMEOUT_EXIT};
 use gnomon_agent::{LaunchSpec, Launcher};
 use gnomon_api::pb::scheduler_client::SchedulerClient;
 use gnomon_api::pb::*;
@@ -97,12 +98,43 @@ async fn main() -> anyhow::Result<()> {
             let spec = LaunchSpec::from_assignment(&a, &name, workdir.clone());
             let launcher = Arc::clone(&launcher);
             tokio::spawn(async move {
-                // Run the job like slurmd: job environment, limits, walltime
-                // enforced (killed at the limit, reported as exit 124).
                 let job_id = spec.job_id;
-                let out = tokio::task::spawn_blocking(move || launcher.run(&spec))
-                    .await
-                    .ok();
+                // Gang ranks wait at the release barrier until every rank has
+                // been fetched, so they start together.
+                let release = if spec.nodelist.len() > 1 {
+                    let probe = || {
+                        let mut c = client.clone();
+                        async move {
+                            c.gang_ready(GangReadyRequest { job_id }).await.map(|r| {
+                                let r = r.into_inner();
+                                (r.ready, r.active)
+                            })
+                        }
+                    };
+                    let limit = barrier::wait_limit(spec.walltime_secs);
+                    barrier::await_release(probe, BARRIER_POLL, limit).await
+                } else {
+                    Release::Go
+                };
+                let out = match release {
+                    // Run the job like slurmd: job environment, limits, walltime
+                    // enforced (killed at the limit, reported as exit 124).
+                    Release::Go => tokio::task::spawn_blocking(move || launcher.run(&spec))
+                        .await
+                        .ok(),
+                    Release::Gone => {
+                        println!("job {job_id}: no longer running; rank not started");
+                        return;
+                    }
+                    Release::TimedOut => {
+                        eprintln!("job {job_id}: gang peers never all arrived; failing this rank");
+                        Some(gnomon_agent::Outcome {
+                            exit_code: BARRIER_TIMEOUT_EXIT,
+                            timed_out: false,
+                            usage: None,
+                        })
+                    }
+                };
                 let code = out.map_or(-1, |o| o.exit_code);
                 match out.and_then(|o| o.usage) {
                     Some(u) => println!("job {job_id} finished: exit {code} ({u})"),

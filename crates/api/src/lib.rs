@@ -7,7 +7,7 @@
 //! N"), giving clients linearizable-ish reads without polling.
 
 use gnomon_core::{Event, Job, JobId, JobState, Resources, Walltime};
-use gnomon_fsm::Fsm;
+use gnomon_fsm::{Fsm, GangRelease};
 use gnomon_sched::EvalBroker;
 use std::sync::Arc;
 use std::time::Duration;
@@ -262,6 +262,7 @@ impl Scheduler for SchedulerSvc {
                     container: j.container.clone().unwrap_or_default(),
                     nodelist: snap.state().job_nodes(j),
                     rank: a.rank,
+                    user: j.user.clone(),
                 })
             })
             .collect();
@@ -272,6 +273,39 @@ impl Scheduler for SchedulerSvc {
             });
         }
         Ok(Response::new(FetchWorkReply { assignments }))
+    }
+
+    /// Release barrier for gang ranks. Fetching a rank's work is recorded by
+    /// the replicated `AssignmentsFetched` event, so "every rank fetched" is
+    /// FSM state: agents poll this and start their rank once it is ready.
+    async fn gang_ready(
+        &self,
+        req: Request<GangReadyRequest>,
+    ) -> Result<Response<GangReadyReply>, Status> {
+        let job = JobId(req.into_inner().job_id);
+        let snap = self.fsm.snapshot();
+        let nodes = snap.job(job).map_or(0, |j| j.node_count());
+        let reply = match snap.state().gang_release(job) {
+            GangRelease::Released => GangReadyReply {
+                ready: true,
+                active: true,
+                fetched: nodes,
+                nodes,
+            },
+            GangRelease::Waiting { fetched, nodes } => GangReadyReply {
+                ready: false,
+                active: true,
+                fetched,
+                nodes,
+            },
+            GangRelease::NotRunning => GangReadyReply {
+                ready: false,
+                active: false,
+                fetched: 0,
+                nodes,
+            },
+        };
+        Ok(Response::new(reply))
     }
 
     async fn report_completion(
@@ -311,6 +345,13 @@ mod tests {
     use super::*;
     use gnomon_core::SystemClock;
     use gnomon_sched::{backfill_pass, BackfillPolicy, PassOptions, PlanApplier};
+
+    async fn gang_ready_of(s: &SchedulerSvc, id: u64) -> GangReadyReply {
+        s.gang_ready(Request::new(GangReadyRequest { job_id: id }))
+            .await
+            .unwrap()
+            .into_inner()
+    }
 
     fn svc() -> SchedulerSvc {
         SchedulerSvc {
@@ -412,6 +453,12 @@ mod tests {
         assert_eq!(listed.jobs[0].nodes, info.nodes);
 
         for (rank, node) in info.nodes.iter().enumerate() {
+            let before = gang_ready_of(&s, id).await;
+            assert!(
+                before.active && !before.ready,
+                "rank {rank} not yet fetched"
+            );
+            assert_eq!((before.fetched, before.nodes), (rank as u32, 2));
             let work = s
                 .fetch_work(Request::new(FetchWorkRequest { node: node.clone() }))
                 .await
@@ -422,7 +469,10 @@ mod tests {
             assert_eq!(work[0].rank, rank as u32);
             assert_eq!(work[0].nodelist, info.nodes);
             assert_eq!(work[0].job_id, id);
+            assert_eq!(work[0].user, "u");
         }
+        let open = gang_ready_of(&s, id).await;
+        assert!(open.ready && open.active, "every rank fetched: released");
         // First rank done: the gang keeps running; a foreign node is refused.
         assert!(report(&s, &info.nodes[1], id, 0).await);
         assert_eq!(job(&s, id).await.state, "RUNNING");
@@ -433,6 +483,8 @@ mod tests {
         assert!(!report(&s, outsider, id, 0).await);
         assert!(report(&s, &info.nodes[0], id, 0).await);
         assert_eq!(job(&s, id).await.state, "COMPLETED");
+        let done = gang_ready_of(&s, id).await;
+        assert!(!done.active && !done.ready, "finished gangs must not start");
         let ranks = s
             .fsm
             .journal()

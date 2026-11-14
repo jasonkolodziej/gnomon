@@ -16,7 +16,7 @@ use gnomon_core::{
     Assignment, Clock, Event, Job, JobId, JobState, NodeInfo, Resources, StateIndex, SystemClock,
 };
 use gnomon_graph::{ResourceGraph, VertexId, VertexKind};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
@@ -36,12 +36,44 @@ pub struct State {
     /// Per-rank exit reports of running gang jobs, `rank -> (end, code)`,
     /// aggregated into the job's completion once every rank has reported.
     pub rank_reports: BTreeMap<JobId, BTreeMap<u32, (u64, i32)>>,
+    /// Ranks of each running gang whose assignment an agent has fetched
+    /// (from replicated `AssignmentsFetched` events, so replay is exact).
+    /// The gang's release barrier opens once every rank is in here.
+    #[serde(default)]
+    pub gang_fetched: BTreeMap<JobId, BTreeSet<u32>>,
     next_job_id: u64,
+}
+
+/// Whether a placed job's ranks may start (see [`State::gang_release`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GangRelease {
+    /// Every rank has been fetched (always the case for single-node jobs).
+    Released,
+    /// Still waiting for the remaining ranks to be fetched.
+    Waiting { fetched: u32, nodes: u32 },
+    /// The job is not running (finished, failed, cancelled or unknown).
+    NotRunning,
 }
 
 impl State {
     pub fn pending_jobs(&self) -> impl Iterator<Item = &Job> {
         self.jobs.values().filter(|j| j.state == JobState::Pending)
+    }
+
+    /// Release barrier for a running job's ranks: a gang is released once
+    /// every rank's assignment has been fetched, so ranks start together
+    /// instead of one agent poll interval apart.
+    pub fn gang_release(&self, job: JobId) -> GangRelease {
+        let Some(j) = self.jobs.get(&job).filter(|j| j.state == JobState::Running) else {
+            return GangRelease::NotRunning;
+        };
+        let nodes = j.node_count();
+        let fetched = self.gang_fetched.get(&job).map_or(0, |r| r.len() as u32);
+        if nodes <= 1 || fetched >= nodes {
+            GangRelease::Released
+        } else {
+            GangRelease::Waiting { fetched, nodes }
+        }
     }
 
     /// Names of the nodes `job` holds, in rank order (empty until placed).
@@ -364,6 +396,7 @@ fn finish(st: &mut State, job: JobId, end: u64, code: i32) {
         };
     }
     st.rank_reports.remove(&job);
+    st.gang_fetched.remove(&job);
     st.graph.release_job(job.0, end);
 }
 
@@ -449,6 +482,15 @@ fn apply_event(st: &mut State, ev: &Event, expect: &[(VertexId, u64)], now: u64)
         Event::AssignmentsFetched { node, count } => {
             if let Some(q) = st.assignments.get_mut(node) {
                 let n = (*count).min(q.len());
+                for a in &q[..n] {
+                    let gang = st
+                        .jobs
+                        .get(&a.job)
+                        .is_some_and(|j| j.state == JobState::Running && j.node_count() > 1);
+                    if gang {
+                        st.gang_fetched.entry(a.job).or_default().insert(a.rank);
+                    }
+                }
                 q.drain(..n);
             }
         }
@@ -851,6 +893,74 @@ mod tests {
             assert!(s.jobs.values().all(|j| s.job_nodes(j).is_empty()));
             assert!(s.graph.vertex(3).planner.job_span(1).is_none());
         });
+    }
+
+    fn fetched(node: &str) -> Event {
+        Event::AssignmentsFetched {
+            node: node.into(),
+            count: 1,
+        }
+    }
+
+    #[test]
+    fn gang_is_released_only_once_every_rank_is_fetched() {
+        let (clock, fsm) = gang_setup(3);
+        let release = |f: &Fsm| f.read(|s| s.gang_release(JobId(1)));
+        assert_eq!(release(&fsm), GangRelease::NotRunning, "not started yet");
+        fsm.apply(start(1, vec![1, 2, 3]));
+        assert_eq!(
+            release(&fsm),
+            GangRelease::Waiting {
+                fetched: 0,
+                nodes: 3
+            }
+        );
+        fsm.apply(fetched("n0"));
+        fsm.apply(fetched("n2"));
+        fsm.apply(fetched("n2")); // nothing left to fetch on n2: no double count
+        assert_eq!(
+            release(&fsm),
+            GangRelease::Waiting {
+                fetched: 2,
+                nodes: 3
+            }
+        );
+        fsm.apply(fetched("n1"));
+        assert_eq!(release(&fsm), GangRelease::Released);
+        // Completion clears the barrier state with the job.
+        clock.set(1050);
+        for n in ["n0", "n1", "n2"] {
+            fsm.apply(rank_done(n, 1050, 0));
+        }
+        assert_eq!(release(&fsm), GangRelease::NotRunning);
+        fsm.read(|s| assert!(s.gang_fetched.is_empty()));
+        // The barrier is replicated state: replay reproduces it exactly.
+        let replica = Fsm::with_clock(Arc::new(ManualClock::new(1000)));
+        for e in fsm.journal() {
+            replica.apply_at(e.event, e.at);
+        }
+        assert_eq!(
+            replica.read(|s| format!("{s:?}")),
+            fsm.read(|s| format!("{s:?}"))
+        );
+    }
+
+    #[test]
+    fn single_node_jobs_are_released_immediately_and_not_tracked() {
+        let (_c, fsm) = setup();
+        fsm.apply(Event::JobSubmitted(job(1, 1, 100)));
+        fsm.apply(Event::JobStarted {
+            job: JobId(1),
+            vertices: vec![1],
+            start: 1000,
+            dur: None,
+        });
+        assert_eq!(
+            fsm.read(|s| s.gang_release(JobId(1))),
+            GangRelease::Released
+        );
+        fsm.apply(fetched("n0"));
+        fsm.read(|s| assert!(s.gang_fetched.is_empty()));
     }
 
     #[test]
