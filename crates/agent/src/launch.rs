@@ -6,7 +6,8 @@
 //! `timeout(1)`.
 
 use crate::cgroup::{Cgroups, JobCgroup, Limits, Usage};
-use crate::container::{self, ContainerRuntime};
+use crate::container::{self, ContainerRuntime, ContainerUser};
+use crate::identity::{self, JobIdentity};
 use gnomon_api::pb::fetch_work_reply::Assignment;
 use std::io::{self, Write};
 use std::os::unix::process::CommandExt;
@@ -40,6 +41,8 @@ pub struct LaunchSpec {
     pub nodelist: Vec<String>,
     /// This node's index in `nodelist`.
     pub rank: u32,
+    /// Submitting user; a root agent runs the job as this local account.
+    pub user: String,
     /// Planned start shared by every rank (Unix seconds). Ranks are launched
     /// on each agent's next poll, so they start within one poll interval of
     /// each other; the job sees this common reference as `GNOMON_JOB_START`.
@@ -69,6 +72,7 @@ impl LaunchSpec {
             container: Some(a.container.clone()).filter(|c| !c.is_empty()),
             nodelist,
             rank: a.rank,
+            user: a.user.clone(),
             start: a.start,
             workdir,
         }
@@ -115,6 +119,9 @@ pub struct Launcher {
     pub runtime: ContainerRuntime,
     /// The agent's `(uid, gid)`, passed to `--user` for containers.
     pub user: Option<(u32, u32)>,
+    /// The agent runs as root: every job is run as its submitting user (see
+    /// [`crate::identity`]); otherwise jobs run as the agent.
+    pub privileged: bool,
     /// How often the walltime watchdog checks the child.
     pub poll: Duration,
 }
@@ -137,19 +144,40 @@ impl Launcher {
             cgroups,
             runtime: ContainerRuntime::from_env(),
             user: current_user(),
+            privileged: identity::is_privileged(),
             poll: Duration::from_millis(200),
         }
     }
 
     /// Run the job to completion (blocking) and return its exit status.
     pub fn run(&self, spec: &LaunchSpec) -> Outcome {
+        let who = match self.job_identity(spec) {
+            Ok(who) => who,
+            Err(e) => {
+                eprintln!(
+                    "job {} rank {}: {e}; not running it",
+                    spec.job_id, spec.rank
+                );
+                return failed();
+            }
+        };
         match &spec.container {
-            Some(image) => self.run_container(spec, image),
-            None => self.run_host(spec),
+            Some(image) => self.run_container(spec, image, who.as_ref()),
+            None => self.run_host(spec, who),
         }
     }
 
-    fn run_host(&self, spec: &LaunchSpec) -> Outcome {
+    /// The account the job runs as: the submitting user when the agent is
+    /// root (an unknown user or uid 0 is refused), else the agent (`None`).
+    pub fn job_identity(&self, spec: &LaunchSpec) -> Result<Option<JobIdentity>, String> {
+        if self.privileged {
+            identity::resolve(&spec.user).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn run_host(&self, spec: &LaunchSpec, who: Option<JobIdentity>) -> Outcome {
         // Confinement was available at start-up, so a per-job setup failure
         // fails the job rather than running it without the limits the
         // scheduler reserved. Unconfined runs happen only when cgroups were
@@ -163,11 +191,7 @@ impl Launcher {
                         "job {} rank {}: cgroup setup failed ({e}); not running it unconfined",
                         spec.job_id, spec.rank
                     );
-                    return Outcome {
-                        exit_code: -1,
-                        timed_out: false,
-                        usage: None,
-                    };
+                    return failed();
                 }
             },
         };
@@ -176,10 +200,7 @@ impl Launcher {
             .arg(&spec.command)
             .envs(spec.env())
             .current_dir(&spec.workdir);
-        let child = match &cg {
-            Some(j) => spawn_in_cgroup(cmd, j),
-            None => cmd.spawn(),
-        };
+        let child = spawn_job(cmd, cg.as_ref(), who);
         let (exit_code, timed_out) = match child {
             Ok(child) => wait_with_walltime(child, spec.walltime_secs, self.poll, || {
                 cg.as_ref().is_some_and(JobCgroup::kill)
@@ -203,8 +224,15 @@ impl Launcher {
         }
     }
 
-    fn run_container(&self, spec: &LaunchSpec, image: &str) -> Outcome {
-        let argv = container::run_argv(&self.runtime, spec, image, self.user);
+    fn run_container(&self, spec: &LaunchSpec, image: &str, who: Option<&JobIdentity>) -> Outcome {
+        let user = match who {
+            Some(id) => ContainerUser::Job {
+                uid: id.uid,
+                gid: id.gid,
+            },
+            None => ContainerUser::Agent(self.user),
+        };
+        let argv = container::run_argv_as(&self.runtime, spec, image, user);
         let child = Command::new(&argv[0]).args(&argv[1..]).spawn();
         let (exit_code, timed_out) = match child {
             Ok(child) => wait_with_walltime(child, spec.walltime_secs, self.poll, || {
@@ -252,7 +280,17 @@ fn stop_container(rt: &ContainerRuntime, job_id: u64, rank: u32) -> bool {
     false
 }
 
-/// Spawn `cmd` with the child already inside the job cgroup.
+/// A job that never ran.
+fn failed() -> Outcome {
+    Outcome {
+        exit_code: -1,
+        timed_out: false,
+        usage: None,
+    }
+}
+
+/// Spawn `cmd` with the child already inside the job cgroup (if any) and
+/// running as the job's user (if the agent is root).
 ///
 /// Race choice: the child joins the cgroup itself, in `pre_exec`, by writing
 /// `0` ("the writing process") to `cgroup.procs` before it execs the job.
@@ -260,12 +298,29 @@ fn stop_container(rt: &ContainerRuntime, job_id: u64, rank: u32) -> bool {
 /// which the job runs unconfined and anything it forks stays outside the
 /// cgroup for good. The file is opened in the parent so the post-fork
 /// closure performs a single `write(2)`: no allocation, async-signal-safe.
-fn spawn_in_cgroup(mut cmd: Command, cg: &JobCgroup) -> io::Result<Child> {
-    let procs = cg.procs_file()?;
-    // SAFETY: the closure only issues write(2) on an fd owned by the parent;
-    // it neither allocates nor takes locks, as required between fork and exec.
-    unsafe {
-        cmd.pre_exec(move || (&procs).write_all(b"0"));
+///
+/// The cgroup is joined first, while the child still has the agent's
+/// rights (through the fd the parent opened), then privileges are dropped:
+/// the job cannot write its own cgroup's limits, which stay root-owned.
+fn spawn_job(
+    mut cmd: Command,
+    cg: Option<&JobCgroup>,
+    who: Option<JobIdentity>,
+) -> io::Result<Child> {
+    if let Some(cg) = cg {
+        let procs = cg.procs_file()?;
+        // SAFETY: the closure only issues write(2) on an fd owned by the
+        // parent; it neither allocates nor takes locks, as required between
+        // fork and exec.
+        unsafe {
+            cmd.pre_exec(move || (&procs).write_all(b"0"));
+        }
+    }
+    if let Some(id) = who {
+        // SAFETY: setgroups/setgid/setuid on data resolved by the parent.
+        unsafe {
+            cmd.pre_exec(move || identity::drop_privileges(&id));
+        }
     }
     cmd.spawn()
 }
@@ -332,6 +387,7 @@ mod tests {
             container: String::new(),
             nodelist: vec![],
             rank: 0,
+            user: "nobody".into(),
         }
     }
 
@@ -340,6 +396,7 @@ mod tests {
             cgroups,
             runtime: ContainerRuntime::from_bin("docker"),
             user: None,
+            privileged: false,
             poll: Duration::from_millis(10),
         }
     }
@@ -432,6 +489,49 @@ mod tests {
         let out = launcher(Some(cg)).run(&spec);
         assert_eq!(out.exit_code, -1);
         assert!(!marker.exists(), "the job must not run unconfined");
+    }
+
+    #[test]
+    fn root_agent_refuses_unknown_and_root_job_users() {
+        let marker = std::env::temp_dir().join(format!("gnomon-refused-{}", std::process::id()));
+        let mut l = launcher(None);
+        l.privileged = true;
+        for user in ["root", "gnomon-no-such-user-x9q", ""] {
+            let mut a = assignment();
+            a.user = user.into();
+            a.command = format!("touch {}", marker.display());
+            let spec = LaunchSpec::from_assignment(&a, "n0", std::env::temp_dir());
+            assert_eq!(l.run(&spec).exit_code, -1, "user {user:?}");
+        }
+        assert!(!marker.exists(), "a refused job must not run");
+    }
+
+    #[test]
+    fn jobs_run_as_the_submitting_user_when_the_agent_is_root() {
+        let out = std::env::temp_dir().join(format!("gnomon-uid-{}", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let mut a = assignment();
+        a.user = "nobody".into();
+        a.command = format!("id -u > {}; id -g >> {}", out.display(), out.display());
+        let spec = LaunchSpec::from_assignment(&a, "n0", std::env::temp_dir());
+        let mut l = launcher(None);
+        l.privileged = identity::is_privileged();
+        assert_eq!(l.run(&spec).exit_code, 0);
+        let ids: Vec<u32> = std::fs::read_to_string(&out)
+            .unwrap()
+            .lines()
+            .map(|x| x.trim().parse().unwrap())
+            .collect();
+        let _ = std::fs::remove_file(&out);
+        if l.privileged {
+            // Root agent: the job dropped to `nobody`, uid and gid.
+            let nobody = identity::resolve("nobody").unwrap();
+            assert_eq!(ids, vec![nobody.uid, nobody.gid]);
+        } else {
+            // Unprivileged agent: it cannot switch users; the job runs as it.
+            let me = current_user().unwrap();
+            assert_eq!(ids, vec![me.0, me.1]);
+        }
     }
 
     #[test]

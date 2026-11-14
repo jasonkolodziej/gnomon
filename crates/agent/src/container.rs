@@ -100,6 +100,17 @@ pub fn container_name(job_id: u64, rank: u32) -> String {
     format!("gnomon-job-{job_id}-r{rank}")
 }
 
+/// Who a container job runs as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerUser {
+    /// An unprivileged agent's own `(uid, gid)` (see [`container_user`]);
+    /// `None` leaves the image's default user.
+    Agent(Option<(u32, u32)>),
+    /// A root agent runs the job as the submitting user's resolved ids,
+    /// never as the agent (which would be host root under rootful Docker).
+    Job { uid: u32, gid: u32 },
+}
+
 /// Full argv (binary first) of the `run` command for `spec` in `image`.
 /// `user` is the agent's `(uid, gid)`; `None` leaves the image's default user.
 pub fn run_argv(
@@ -107,6 +118,16 @@ pub fn run_argv(
     spec: &LaunchSpec,
     image: &str,
     user: Option<(u32, u32)>,
+) -> Vec<String> {
+    run_argv_as(rt, spec, image, ContainerUser::Agent(user))
+}
+
+/// [`run_argv`] for an explicit [`ContainerUser`].
+pub fn run_argv_as(
+    rt: &ContainerRuntime,
+    spec: &LaunchSpec,
+    image: &str,
+    who: ContainerUser,
 ) -> Vec<String> {
     let mut v: Vec<String> = vec![rt.bin.clone(), "run".into(), "--rm".into()];
     let mut push = |a: &str, b: String| {
@@ -125,14 +146,22 @@ pub fn run_argv(
         push("--gpus", spec.gpus.to_string());
     }
     push("--network", "host".into());
-    if let Some(id) = container_user(rt, user) {
-        if rt.kind == RuntimeKind::Podman {
-            // Map the agent's uid to itself inside the user namespace so files
-            // written to the bind mount belong to the job's user.
-            v.push("--userns=keep-id".into());
+    match who {
+        ContainerUser::Agent(user) => {
+            if let Some(id) = container_user(rt, user) {
+                if rt.kind == RuntimeKind::Podman {
+                    // Map the agent's uid to itself inside the user namespace so
+                    // files written to the bind mount belong to the job's user.
+                    v.push("--userns=keep-id".into());
+                }
+                v.push("--user".into());
+                v.push(id);
+            }
         }
-        v.push("--user".into());
-        v.push(id);
+        ContainerUser::Job { uid, gid } => {
+            v.push("--user".into());
+            v.push(format!("{uid}:{gid}"));
+        }
     }
     let wd = spec.workdir.display().to_string();
     v.push("-v".into());
@@ -230,6 +259,7 @@ mod tests {
             container: Some("pytorch:24.05".into()),
             nodelist: vec!["n0".into()],
             rank: 0,
+            user: String::new(),
             start: 0,
             workdir: PathBuf::from("/scratch/u"),
         }
@@ -353,6 +383,25 @@ mod tests {
             Some("1000:100".into())
         );
         assert_eq!(container_user(&rt, None), None);
+    }
+
+    #[test]
+    fn root_agent_runs_container_jobs_as_the_submitting_user() {
+        for bin in ["docker", "podman"] {
+            let rt = ContainerRuntime::from_bin(bin);
+            let v = run_argv_as(
+                &rt,
+                &spec(1, 0, 0),
+                "img",
+                ContainerUser::Job {
+                    uid: 1234,
+                    gid: 1234,
+                },
+            );
+            assert!(has_pair(&v, "--user", "1234:1234"), "{bin}");
+            assert!(!v.contains(&"--userns=keep-id".to_string()), "{bin}");
+            assert!(!v.iter().any(|a| a == "0:0"), "{bin}: never host root");
+        }
     }
 
     #[test]

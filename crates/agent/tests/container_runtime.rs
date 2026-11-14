@@ -35,6 +35,7 @@ fn spec(command: &str, walltime_secs: u64) -> LaunchSpec {
         container: Some("alpine:3.20".into()),
         nodelist: vec!["local".into()],
         rank: 0,
+        user: String::new(),
         start: 0,
         workdir: std::env::temp_dir(),
     }
@@ -52,6 +53,7 @@ fn container_jobs_run_through_runtime_and_walltime_kills_container() {
         cgroups: None,
         runtime: ContainerRuntime::from_bin(bin.to_str().unwrap()),
         user: Some((1000, 1000)),
+        privileged: false,
         poll: Duration::from_millis(50),
     };
 

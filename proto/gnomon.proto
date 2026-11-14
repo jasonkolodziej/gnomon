@@ -11,6 +11,8 @@ service Scheduler {
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatReply);
   rpc FetchWork(FetchWorkRequest) returns (FetchWorkReply);
   rpc ReportCompletion(ReportCompletionRequest) returns (ReportCompletionReply);
+  // Gang release barrier: a rank may start once every rank has been fetched.
+  rpc GangReady(GangReadyRequest) returns (GangReadyReply);
 }
 
 message Resources { uint32 cores = 1; uint64 mem_mb = 2; uint32 gpus = 3; }
@@ -60,8 +62,21 @@ message FetchWorkReply {
   message Assignment { uint64 job_id = 1; string command = 2; Resources request = 3; uint64 start = 4;
                        uint64 walltime_secs = 5; string name = 6;
                        string container = 7;
-                       repeated string nodelist = 8; uint32 rank = 9; }
+                       repeated string nodelist = 8; uint32 rank = 9;
+                       // Submitting user; a root agent runs the job as this local account.
+                       string user = 10; }
   repeated Assignment assignments = 1;
 }
 message ReportCompletionRequest { string node = 1; uint64 job_id = 2; int32 exit_code = 3; }
 message ReportCompletionReply { bool ok = 1; }
+
+// Release barrier for gang ranks (see GangReady).
+message GangReadyRequest { uint64 job_id = 1; }
+message GangReadyReply {
+  // Every rank has been fetched: start now.
+  bool ready = 1;
+  // False once the job is no longer running (finished, failed or unknown): do not start.
+  bool active = 2;
+  uint32 fetched = 3;
+  uint32 nodes = 4;
+}

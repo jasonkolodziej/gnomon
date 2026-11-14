@@ -1069,6 +1069,7 @@ dependencies = [
  "anyhow",
  "gnomon-api",
  "gnomon-core",
+ "libc",
  "tokio",
  "tonic",
 ]

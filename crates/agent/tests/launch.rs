@@ -17,6 +17,7 @@ fn spec(command: &str, walltime_secs: u64) -> LaunchSpec {
         container: None,
         nodelist: vec!["local".into()],
         rank: 0,
+        user: String::new(),
         start: 0,
         workdir: std::env::temp_dir(),
     }
@@ -27,6 +28,7 @@ fn launcher() -> Launcher {
         cgroups: None,
         runtime: ContainerRuntime::from_bin("docker"),
         user: None,
+        privileged: false,
         poll: Duration::from_millis(50),
     }
 }
