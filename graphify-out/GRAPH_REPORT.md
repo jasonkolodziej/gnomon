@@ -9,7 +9,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `52b52516`
+- Built from commit: `5fa56016`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -297,7 +297,7 @@ Nodes (4): GNOMON_HEARTBEAT_SECS, local-cluster.sh script, start(), stop()
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `Job` connect `Community 15` to `Community 1`, `Community 2`, `Community 3`, `Community 36`, `Community 13`, `Community 14`, `Community 19`, `Community 20`, `Community 24`, `Community 27`, `Community 28`, `Community 29`, `Community 30`, `Community 31`?**
-  _High betweenness centrality (0.077) - this node is a cross-community bridge._
+  _High betweenness centrality (0.087) - this node is a cross-community bridge._
 - **Are the 21 inferred relationships involving `JobId` (e.g. with `container_image_flows_from_submit_to_job_info_and_fetch_work()` and `fsm_with_node()`) actually correct?**
   _`JobId` has 21 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `Job`, `Docker`, `Podman` to the rest of the system?**
@@ -305,8 +305,8 @@ _Questions this graph is uniquely positioned to answer:_
 - **Should `Community 0` be split into smaller, more focused modules?**
   _Cohesion score 0.05369415807560137 - nodes in this community are weakly interconnected._
 - **Why does `Resources` connect `Community 2` to `Community 1`, `Community 36`, `Community 6`, `Community 38`, `Community 11`, `Community 15`, `Community 19`, `Community 25`, `Community 27`, `Community 30`?**
-  _High betweenness centrality (0.073) - this node is a cross-community bridge._
+  _High betweenness centrality (0.067) - this node is a cross-community bridge._
 - **Should `Community 1` be split into smaller, more focused modules?**
   _Cohesion score 0.05025712949976625 - nodes in this community are weakly interconnected._
 - **Why does `Fsm` connect `Community 23` to `Community 1`, `Community 34`, `Community 3`, `Community 5`, `Community 6`, `Community 38`, `Community 42`, `Community 11`, `Community 14`, `Community 46`, `Community 18`, `Community 19`, `Community 20`, `Community 25`, `Community 26`, `Community 29`?**
-  _High betweenness centrality (0.066) - this node is a cross-community bridge._
+  _High betweenness centrality (0.063) - this node is a cross-community bridge._
