@@ -3,7 +3,7 @@
 use crate::SimJob;
 #[allow(unused_imports)]
 use gnomon_core::Clock;
-use gnomon_core::{Event, JobId, ManualClock};
+use gnomon_core::{Event, JobId, JobState, ManualClock};
 use gnomon_fsm::{Fsm, JournalEntry};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -32,26 +32,44 @@ pub fn verify_exact(original: &Fsm) -> bool {
 /// Recover the workload a journal describes: every submitted job, with its
 /// true runtime taken from when it actually ran (accepted start) to its
 /// completion. Jobs that never finished are dropped.
+///
+/// A job's end is its `JobFinished` time or, for a gang that completed
+/// through per-rank reports, the latest *accepted* `JobRankFinished` (the
+/// time the FSM releases it at); duplicate or foreign rank reports, which
+/// the FSM rejects, are ignored the same way.
 pub fn workload_from_journal(journal: &[JournalEntry]) -> Vec<SimJob> {
-    let fsm = rebuild(journal);
-    let ends: BTreeMap<JobId, u64> = journal
-        .iter()
-        .filter_map(|e| match &e.event {
-            Event::JobFinished { job, end, .. } => Some((*job, *end)),
-            _ => None,
-        })
-        .collect();
-    // The accepted start is the job's planned_start in the rebuilt state.
+    let clock = Arc::new(ManualClock::new(journal.first().map(|e| e.at).unwrap_or(0)));
+    let fsm = Fsm::with_clock(clock.clone());
+    let mut ends: BTreeMap<JobId, u64> = BTreeMap::new();
+    for e in journal {
+        clock.set(e.at);
+        let accepted = fsm.apply_checked(e.event.clone()).accepted;
+        match &e.event {
+            Event::JobFinished { job, end, .. } => {
+                ends.insert(*job, *end);
+            }
+            Event::JobRankFinished { job, end, .. } if accepted => {
+                let last = ends.entry(*job).or_insert(*end);
+                *last = (*last).max(*end);
+            }
+            _ => {}
+        }
+    }
+    // The accepted start is the job's planned_start in the rebuilt state;
+    // only jobs that reached a terminal state count as finished.
     fsm.read(|st| {
         st.jobs
             .values()
+            .filter(|j| matches!(j.state, JobState::Completed | JobState::Failed))
             .filter_map(|j| {
                 let end = *ends.get(&j.id)?;
                 let start = j.planned_start?;
                 let mut job = j.clone();
-                job.state = gnomon_core::JobState::Pending;
+                job.state = JobState::Pending;
                 job.planned_start = None;
                 job.planned_dur = None;
+                job.placed_on = None;
+                job.allocation = None;
                 Some(SimJob {
                     job,
                     actual: end - start,
@@ -185,5 +203,61 @@ mod tests {
         assert_eq!(error.line, 3);
         assert!(error.to_string().contains("line 3"));
         assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn live_gang_finished_by_rank_reports_is_recovered() {
+        let clock = Arc::new(ManualClock::new(1000));
+        let fsm = Fsm::recording(clock.clone());
+        for n in ["n0", "n1"] {
+            fsm.apply(Event::NodeRegistered {
+                name: n.into(),
+                capacity: Resources {
+                    cores: 4,
+                    mem_mb: 0,
+                    gpus: 0,
+                },
+            });
+        }
+        let mut gang = gnomon_core::Job::new(
+            JobId(1),
+            "mpi",
+            "u",
+            Resources {
+                cores: 4,
+                mem_mb: 0,
+                gpus: 0,
+            },
+            Walltime(std::time::Duration::from_secs(600)),
+        );
+        gang.nodes = 2;
+        gang.submit_time = 1000;
+        fsm.apply(Event::JobSubmitted(gang));
+        let vs: Vec<u32> =
+            fsm.read(|st| ["n0", "n1"].map(|n| st.graph.by_name(n).unwrap()).to_vec());
+        fsm.apply(Event::JobStarted {
+            job: JobId(1),
+            vertices: vs,
+            start: 1000,
+            dur: None,
+        });
+        let rank = |node: &str, end: u64| Event::JobRankFinished {
+            job: JobId(1),
+            node: node.into(),
+            end,
+            code: 0,
+        };
+        clock.set(1100);
+        fsm.apply(rank("n0", 1100));
+        clock.set(1500);
+        fsm.apply(rank("n0", 1500)); // duplicate: rejected, must not count
+        clock.set(1200);
+        fsm.apply(rank("n1", 1200));
+
+        let w = workload_from_journal(&fsm.journal());
+        assert_eq!(w.len(), 1, "the gang finished through rank reports");
+        assert_eq!(w[0].actual, 200, "latest accepted rank end - start");
+        assert_eq!(w[0].job.nodes, 2);
+        assert!(w[0].job.allocation.is_none() && w[0].job.placed_on.is_none());
     }
 }
