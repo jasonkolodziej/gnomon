@@ -23,17 +23,24 @@ use std::time::Duration;
 
 /// Where to persist controller state: `--state-dir <dir>` (or
 /// `--state-dir=<dir>`) wins over the `GNOMON_STATE_DIR` value `env`.
-fn state_dir(args: &[String], env: Option<String>) -> Option<PathBuf> {
+/// A `--state-dir` without a directory is an error, never a silent fallback
+/// to in-memory state: a typo must not quietly disable durability.
+fn state_dir(args: &[String], env: Option<String>) -> Result<Option<PathBuf>, String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--state-dir" {
-            return it.next().map(PathBuf::from);
-        }
-        if let Some(v) = a.strip_prefix("--state-dir=") {
-            return Some(PathBuf::from(v));
-        }
+        let v = if a == "--state-dir" {
+            it.next().map(String::as_str)
+        } else if let Some(v) = a.strip_prefix("--state-dir=") {
+            Some(v)
+        } else {
+            continue;
+        };
+        return match v {
+            Some(d) if !d.is_empty() && !d.starts_with("--") => Ok(Some(PathBuf::from(d))),
+            _ => Err("--state-dir needs a directory".into()),
+        };
     }
-    env.filter(|v| !v.is_empty()).map(PathBuf::from)
+    Ok(env.filter(|v| !v.is_empty()).map(PathBuf::from))
 }
 
 /// The controller FSM: recovered from (and journaled to) `dir` when given,
@@ -179,7 +186,13 @@ async fn main() {
     }
     use gnomon_api::SchedulerSvc;
 
-    let dir = state_dir(&args[1..], std::env::var("GNOMON_STATE_DIR").ok());
+    let dir = match state_dir(&args[1..], std::env::var("GNOMON_STATE_DIR").ok()) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("gnomon-ctl: {e}");
+            std::process::exit(2);
+        }
+    };
     let fsm = match open_fsm(dir.as_deref(), Arc::new(SystemClock)) {
         Ok(fsm) => fsm,
         Err(e) => {
@@ -259,15 +272,28 @@ mod tests {
         let env = Some("/env".to_string());
         assert_eq!(
             state_dir(&args(&["--state-dir", "/flag"]), env.clone()),
-            Some(PathBuf::from("/flag"))
+            Ok(Some(PathBuf::from("/flag")))
         );
         assert_eq!(
             state_dir(&args(&["--state-dir=/eq"]), env.clone()),
-            Some(PathBuf::from("/eq"))
+            Ok(Some(PathBuf::from("/eq")))
         );
-        assert_eq!(state_dir(&[], env), Some(PathBuf::from("/env")));
-        assert_eq!(state_dir(&[], Some(String::new())), None);
-        assert_eq!(state_dir(&[], None), None);
+        assert_eq!(state_dir(&[], env), Ok(Some(PathBuf::from("/env"))));
+        assert_eq!(state_dir(&[], Some(String::new())), Ok(None));
+        assert_eq!(state_dir(&[], None), Ok(None));
+    }
+
+    #[test]
+    fn state_dir_flag_without_a_directory_is_rejected() {
+        // Even with GNOMON_STATE_DIR set: never silently fall back.
+        let env = Some("/env".to_string());
+        for bad in [
+            &["--state-dir"][..],
+            &["--state-dir="],
+            &["--state-dir", "--other"],
+        ] {
+            assert!(state_dir(&args(bad), env.clone()).is_err(), "{bad:?}");
+        }
     }
 
     fn submit(fsm: &Fsm, id: u64, cores: u32) {
