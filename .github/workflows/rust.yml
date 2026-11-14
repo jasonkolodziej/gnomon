@@ -105,3 +105,47 @@ jobs:
 
       - name: Build documentation
         run: cargo doc --workspace --no-deps --locked
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Benchmark and experiment drivers are exercised by bench.yml, not unit tests.
+      - name: Measure line coverage (floor 80%)
+        shell: bash # -o pipefail, so the floor still fails the step through tee
+        run: >
+          cargo llvm-cov --workspace --locked
+          --ignore-filename-regex 'src/bin/(bench|occ_bench|experiments)\.rs$'
+          --fail-under-lines 80
+          --summary-only | tee coverage.txt
+
+      - name: Publish coverage
+        if: always()
+        run: |
+          {
+            echo "## Line coverage"; echo; echo '```'
+            sed -n '/^Filename/,$p' coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

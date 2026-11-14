@@ -1,0 +1,143 @@
+name: Benchmarks
+
+# Every change is measured with the replay harness: the replay gate re-runs the production
+# scheduling path on fixed synthetic workloads and real Parallel Workloads Archive traces and fails
+# if schedule quality regresses against results/replay_baseline.json or replay stops being exact.
+# The planner (bench) and controller-concurrency (occ_bench) benchmarks run alongside; their timings
+# are published but not gated, since shared runners are too noisy for absolute thresholds.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  TRACES: ${{ github.workspace }}/.traces
+
+jobs:
+  replay-gate:
+    name: Replay gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Cache SWF traces
+        id: traces
+        uses: actions/cache@v4
+        with:
+          path: .traces
+          key: swf-traces-v1
+
+      - name: Download SWF traces
+        if: steps.traces.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$TRACES"
+          base=https://www.cs.huji.ac.il/labs/parallel/workload
+          for p in l_sdsc_sp2/SDSC-SP2-1998-4.2-cln l_ctc_sp2/CTC-SP2-1996-3.1-cln l_hpc2n/HPC2N-2002-2.2-cln; do
+            curl -fsSL --retry 3 "$base/$p.swf.gz" | gunzip > "$TRACES/$(basename "$p").swf"
+          done
+          wc -l "$TRACES"/*.swf
+
+      - name: Run the replay gate
+        run: >
+          cargo run --release --locked -p gnomon-sim --bin replay_gate --
+          --traces "$TRACES" --summary "$GITHUB_STEP_SUMMARY"
+
+  benchmarks:
+    name: Planner and concurrency benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+          save-if: false
+
+      - name: Build benchmarks
+        run: cargo build --release --locked -p gnomon-sched --bins
+
+      - name: Planning-core benchmark (serial vs parallel)
+        run: target/release/bench | tee bench_results.csv
+
+      - name: Controller-path concurrency benchmark (OCC)
+        run: target/release/occ_bench | tee occ_conflicts.csv
+
+      - name: Publish results
+        run: |
+          table() {
+            echo "| $(head -1 "$1" | sed 's/,/ | /g') |"
+            echo "|$(head -1 "$1" | sed 's/[^,]*/---/g; s/,/|/g')|"
+            tail -n +2 "$1" | sed 's/,/ | /g; s/^/| /; s/$/ |/'
+          }
+          {
+            echo "## Planning-core benchmark (\`bench\`)"; echo; table bench_results.csv; echo
+            echo "## Controller-path concurrency (\`occ_bench\`)"; echo; table occ_conflicts.csv; echo
+            echo "_Shared runner, $(nproc) vCPUs: compare runs relative to each other, not absolutely._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks
+          path: |
+            bench_results.csv
+            occ_conflicts.csv
+
+  throughput-ab:
+    name: Controller throughput vs base
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+          save-if: false
+
+      - name: Build occ_bench for the PR and its base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          cargo build --release --locked -p gnomon-sched --bin occ_bench
+          cp target/release/occ_bench occ_bench.pr
+          git worktree add --detach base "$BASE_SHA"
+          (cd base && cargo build --release --locked -p gnomon-sched --bin occ_bench --target-dir ../target)
+          cp target/release/occ_bench occ_bench.base
+
+      # Interleaved runs on one runner; fails if the PR's median falls below 85% of the base.
+      - name: A/B controller-path throughput
+        run: python3 .github/scripts/occ_ab.py ./occ_bench.base ./occ_bench.pr --runs 3 --summary "$GITHUB_STEP_SUMMARY"

@@ -259,6 +259,11 @@ impl Planner {
             .map(|s| (s.start, s.end))
     }
 
+    /// End of the last span (0 when empty).
+    pub fn last_end(&self) -> u64 {
+        self.spans.iter().map(|s| s.end).max().unwrap_or(0)
+    }
+
     pub fn span_count(&self) -> usize {
         self.spans.len()
     }
@@ -266,6 +271,19 @@ impl Planner {
     pub fn release_before(&mut self, now: u64) {
         self.spans.retain(|s| s.end > now);
     }
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+/// Least common multiple, saturating at `u64::MAX`.
+fn lcm_sat(a: u64, b: u64) -> u64 {
+    (a / gcd(a, b)).saturating_mul(b)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -375,13 +393,7 @@ impl ResourceGraph {
         if req.is_zero() {
             return None;
         }
-        let leaves: Vec<VertexId> = self
-            .leaves()
-            .filter(|&id| {
-                self.vertex(id).kind == VertexKind::Node
-                    && !self.vertex(id).name.starts_with("granted:")
-            })
-            .collect();
+        let leaves = self.schedulable_nodes();
         if leaves.is_empty() {
             return None;
         }
@@ -407,6 +419,131 @@ impl ResourceGraph {
         best
     }
 
+    /// Node leaves the parent may place on: `Node` vertices that are not
+    /// granted to a child instance, in vertex order.
+    pub fn schedulable_nodes(&self) -> Vec<VertexId> {
+        self.leaves()
+            .filter(|&id| {
+                let v = self.vertex(id);
+                v.kind == VertexKind::Node && !v.name.starts_with("granted:")
+            })
+            .collect()
+    }
+
+    /// Gang matching (Slurm `-N`): the earliest common start `t >= from` at
+    /// which at least `nodes` distinct node leaves can each hold `req` (per
+    /// node) for `[t, t+dur)`. Returns the chosen vertices in ascending
+    /// vertex order (that order defines the ranks) and `t`. `nodes <= 1`
+    /// is exactly [`ResourceGraph::match_request`].
+    ///
+    /// Algorithm (fixpoint over per-leaf earliest fits). Let `e_l(t)` be
+    /// leaf `l`'s `earliest_fit(req, t, dur)`. Starting at `t = from`, let
+    /// `t'` be the `nodes`-th smallest `e_l(t)`. No start in `[t, t')` can
+    /// work: a leaf feasible at `s` has `e_l(t) <= s`, and fewer than
+    /// `nodes` leaves have `e_l(t) < t'`. So if `t' == t` the `nodes`
+    /// leaves with `e_l(t) == t` are the answer; otherwise advance to `t'`.
+    /// Because `e_l(t') == e_l(t)` whenever `e_l(t) >= t'` (earliest-fit is
+    /// constant up to its own answer), only the at most `nodes - 1` leaves
+    /// with `e_l(t) < t'` are re-queried per step.
+    ///
+    /// Complexity with `L` leaves, `S` spans per leaf and `K` advances:
+    /// `O(L·S log S)` for the first sweep plus `O(K·(nodes·S log S + L))`
+    /// afterwards; `K` is bounded by the number of distinct fit points
+    /// (span ends and profile breakpoints) after `from`, and in practice is
+    /// a handful. Each candidate is checked exactly, so capacity profiles
+    /// and `granted:` exclusions are respected as in the single-node path.
+    /// Termination: after every span has ended and every non-periodic
+    /// profile step has passed, feasibility is periodic with the LCM of the
+    /// leaves' profile periods, so a search that passes that horizon
+    /// returns `None` (the gang can never start).
+    ///
+    /// `seed` rotates the scan order used to pick among more than `nodes`
+    /// feasible leaves at `t`, spreading load like `match_request`.
+    pub fn match_gang(
+        &self,
+        req: &Resources,
+        nodes: u32,
+        from: u64,
+        dur: u64,
+        seed: u64,
+    ) -> Option<(Vec<VertexId>, u64)> {
+        let need = nodes.max(1) as usize;
+        if need == 1 {
+            return self.match_request(req, from, dur, seed);
+        }
+        if req.is_zero() {
+            return None;
+        }
+        let all = self.schedulable_nodes();
+        if all.len() < need {
+            return None;
+        }
+        let off = (seed as usize) % all.len();
+        // Leaves in seed-rotated order, with their earliest fit from `t`.
+        let mut fits: Vec<(VertexId, u64)> = (0..all.len())
+            .map(|k| all[(off + k) % all.len()])
+            .filter_map(|id| Some((id, self.vertex(id).earliest_fit(req, from, dur)?)))
+            .collect();
+        let horizon = self.gang_horizon(&all, from, dur);
+        let mut t = from;
+        loop {
+            if fits.len() < need {
+                return None; // fewer than `nodes` leaves can ever hold `req`
+            }
+            let mut starts: Vec<u64> = fits.iter().map(|f| f.1).collect();
+            let (_, &mut t_next, _) = starts.select_nth_unstable(need - 1);
+            if t_next == t {
+                let mut chosen: Vec<VertexId> = fits
+                    .iter()
+                    .filter(|f| f.1 == t)
+                    .take(need)
+                    .map(|f| f.0)
+                    .collect();
+                chosen.sort_unstable();
+                return Some((chosen, t));
+            }
+            if t_next > horizon {
+                return None;
+            }
+            t = t_next;
+            // Only leaves whose fit lies before `t` can have moved.
+            fits.retain_mut(|(id, e)| {
+                if *e >= t {
+                    return true;
+                }
+                match self.vertex(*id).earliest_fit(req, t, dur) {
+                    Some(s) => {
+                        *e = s;
+                        true
+                    }
+                    None => false,
+                }
+            });
+        }
+    }
+
+    /// Latest start a gang search must examine: beyond it every leaf's
+    /// feasibility is periodic (all spans over, every non-periodic profile
+    /// step past), so a common start would already have been found.
+    fn gang_horizon(&self, leaves: &[VertexId], from: u64, dur: u64) -> u64 {
+        let mut settle = from;
+        let mut lcm: u64 = 1;
+        for &id in leaves {
+            let v = self.vertex(id);
+            settle = settle.max(v.planner.last_end());
+            if let Some(p) = &v.profile {
+                match p.period {
+                    Some(per) if per > 0 => lcm = lcm_sat(lcm, per),
+                    _ => {
+                        let last = p.steps.iter().map(|s| s.0).max().unwrap_or(0);
+                        settle = settle.max(last);
+                    }
+                }
+            }
+        }
+        settle.saturating_add(lcm).saturating_add(dur)
+    }
+
     /// Versions of the given vertices (a plan's read set).
     pub fn versions(&self, vertices: &[VertexId]) -> Vec<(VertexId, u64)> {
         vertices
@@ -426,7 +563,10 @@ impl ResourceGraph {
     /// at the version the plan read (`expect`), the plan was computed against
     /// this exact planner state and is valid by construction: insert without
     /// re-checking (fast path). Otherwise revalidate capacity (slow path) —
-    /// the plan is rejected only if it no longer fits. All-or-nothing.
+    /// the plan is rejected only if it no longer fits. All-or-nothing: every
+    /// vertex is validated before any is booked, so a gang whose plan
+    /// conflicts on one vertex leaves all of them untouched. Duplicate
+    /// vertices are rejected.
     pub fn commit_job(
         &mut self,
         vertices: &[VertexId],
@@ -436,6 +576,16 @@ impl ResourceGraph {
         job: Option<u64>,
         expect: &[(VertexId, u64)],
     ) -> bool {
+        // A vertex listed twice would be checked once but booked twice. Gangs
+        // are a handful of vertices, and this runs under the FSM write lock:
+        // an allocation-free pairwise check beats sorting a copy.
+        if vertices
+            .iter()
+            .enumerate()
+            .any(|(i, v)| vertices[i + 1..].contains(v))
+        {
+            return false;
+        }
         let fast = !expect.is_empty()
             && expect.len() == vertices.len()
             && expect.iter().all(|&(v, ver)| self.vertex(v).version == ver);
@@ -673,6 +823,207 @@ mod planner_tests {
                 "case {case}: spans={spans:?} req={req} from={from} dur={dur} periodic={periodic}"
             );
         }
+    }
+
+    /// One leaf for the gang oracle: its spans and its capacity over time.
+    type LeafModel<'a> = (Vec<(u64, u64, u32)>, &'a dyn Fn(u64) -> u32);
+
+    /// Brute-force gang oracle: earliest `t` in `[from, limit)` at which at
+    /// least `n` leaves individually fit (per the single-leaf oracle).
+    fn gang_oracle(
+        leaves: &[LeafModel],
+        req: u32,
+        n: usize,
+        from: u64,
+        dur: u64,
+        limit: u64,
+    ) -> Option<u64> {
+        (from..limit).find(|&t| {
+            leaves
+                .iter()
+                .filter(|(spans, cap)| oracle(spans, *cap, req, t, dur, t + 1) == Some(t))
+                .count()
+                >= n
+        })
+    }
+
+    #[test]
+    fn gang_matches_bruteforce_oracle() {
+        let mut x: u64 = 0x1234_5678_9ABC_DEF1;
+        let mut next = || {
+            x = x.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = x;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^ (z >> 31)
+        };
+        let base = 6u32;
+        let periodic_cap = |t: u64| if t % 20 >= 12 { 3 } else { base };
+        let fixed_cap = |_t: u64| base;
+        let prof = CapacityProfile {
+            period: Some(20),
+            steps: vec![(0, r(base)), (12, r(3))],
+        };
+        let mut delayed = 0;
+        let mut infeasible = 0;
+        for case in 0..500 {
+            let mut g = ResourceGraph::default();
+            let root = g.add_vertex(VertexKind::Cluster, "c", Resources::default(), None);
+            let n_leaves = 2 + (next() % 4) as usize;
+            let mut model: Vec<LeafModel> = vec![];
+            for l in 0..n_leaves {
+                let id = g.add_vertex(VertexKind::Node, &format!("n{l}"), r(base), Some(root));
+                let periodic = next() % 3 == 0;
+                if periodic {
+                    g.set_profile(id, Some(prof.clone()));
+                }
+                let mut spans = vec![];
+                for _ in 0..(next() % 6) {
+                    let s = next() % 40;
+                    let d = 1 + next() % 15;
+                    let c = 1 + (next() % 4) as u32;
+                    g.vertex_mut(id).planner.spans.push(Span {
+                        start: s,
+                        end: s + d,
+                        res: r(c),
+                        job: None,
+                    });
+                    spans.push((s, s + d, c));
+                }
+                let cap: &dyn Fn(u64) -> u32 = if periodic { &periodic_cap } else { &fixed_cap };
+                model.push((spans, cap));
+            }
+            let need = 1 + (next() as usize) % n_leaves;
+            let req = 1 + (next() % 4) as u32;
+            let from = next() % 30;
+            let dur = 1 + next() % 15;
+            let got = g.match_gang(&r(req), need as u32, from, dur, next());
+            let want = gang_oracle(&model, req, need, from, dur, 300);
+            assert_eq!(
+                got.as_ref().map(|g| g.1),
+                want,
+                "case {case}: need={need} req={req} from={from} dur={dur} model={:?}",
+                model.iter().map(|m| &m.0).collect::<Vec<_>>()
+            );
+            match got {
+                None => infeasible += 1,
+                Some((verts, t)) => {
+                    if t > from {
+                        delayed += 1;
+                    }
+                    assert_eq!(verts.len(), need);
+                    assert!(verts.windows(2).all(|w| w[0] < w[1]), "sorted, distinct");
+                    for v in &verts {
+                        assert_eq!(g.vertex(*v).earliest_fit(&r(req), t, dur), Some(t));
+                    }
+                }
+            }
+        }
+        assert!(delayed > 50, "cases exercise delayed starts: {delayed}");
+        assert!(
+            infeasible > 5,
+            "cases exercise infeasible gangs: {infeasible}"
+        );
+    }
+
+    fn nodes_graph(n: usize, cores: u32) -> (ResourceGraph, Vec<VertexId>) {
+        let mut g = ResourceGraph::default();
+        let root = g.add_vertex(VertexKind::Cluster, "c", Resources::default(), None);
+        let ids = (0..n)
+            .map(|i| g.add_vertex(VertexKind::Node, &format!("n{i}"), r(cores), Some(root)))
+            .collect();
+        (g, ids)
+    }
+
+    #[test]
+    fn gang_waits_for_enough_simultaneously_free_nodes() {
+        let (mut g, ids) = nodes_graph(4, 4);
+        // n0 busy [0,100), n1 busy [50,150), n2 busy [0,30), n3 free.
+        assert!(g.commit_job(&[ids[0]], &r(4), 0, 100, Some(1), &[]));
+        assert!(g.commit_job(&[ids[1]], &r(4), 50, 100, Some(2), &[]));
+        assert!(g.commit_job(&[ids[2]], &r(4), 0, 30, Some(3), &[]));
+        // Two nodes for 20s: n3 now, and n1 ([0,20) ends before its span).
+        assert_eq!(
+            g.match_gang(&r(4), 2, 0, 20, 0),
+            Some((vec![ids[1], ids[3]], 0))
+        );
+        // Three nodes for 40s: n2 frees at 30 but n1 is busy from 50 and n0
+        // until 100, so the earliest common window is [100,140) on n0,n2,n3.
+        assert_eq!(
+            g.match_gang(&r(4), 3, 0, 40, 0),
+            Some((vec![ids[0], ids[2], ids[3]], 100))
+        );
+        // All four for 10s: only after n1 frees at 150.
+        assert_eq!(g.match_gang(&r(4), 4, 0, 10, 7).unwrap().1, 150);
+        // More nodes than exist, or a per-node request larger than any node.
+        assert_eq!(g.match_gang(&r(4), 5, 0, 10, 0), None);
+        assert_eq!(g.match_gang(&r(5), 2, 0, 10, 0), None);
+        // nodes 0 and 1 are the single-node path.
+        assert_eq!(
+            g.match_gang(&r(4), 0, 0, 20, 3),
+            g.match_request(&r(4), 0, 20, 3)
+        );
+        assert_eq!(
+            g.match_gang(&r(4), 1, 0, 20, 3),
+            g.match_request(&r(4), 0, 20, 3)
+        );
+    }
+
+    #[test]
+    fn gang_seed_rotates_choice_among_free_nodes() {
+        let (g, ids) = nodes_graph(4, 4);
+        let a = g.match_gang(&r(1), 2, 0, 10, 0).unwrap().0;
+        let b = g.match_gang(&r(1), 2, 0, 10, 2).unwrap().0;
+        assert_eq!(a, vec![ids[0], ids[1]]);
+        assert_eq!(b, vec![ids[2], ids[3]]);
+    }
+
+    #[test]
+    fn gang_skips_granted_nodes_and_honours_profiles() {
+        let (mut g, ids) = nodes_graph(3, 8);
+        let _grant = g.grant_subgraph(&ids[0..1]);
+        // Only n1, n2 are visible to the parent: a 3-node gang never fits.
+        assert_eq!(g.match_gang(&r(1), 3, 0, 10, 0), None);
+        // n2 is capped to 2 cores during [0, 3600) each day.
+        g.set_profile(
+            ids[2],
+            Some(CapacityProfile::daily(vec![(0, r(2)), (3600, r(8))])),
+        );
+        assert_eq!(
+            g.match_gang(&r(4), 2, 0, 600, 0),
+            Some((vec![ids[1], ids[2]], 3600))
+        );
+        // n1 now only has capacity in [0,100) each day, which never overlaps
+        // n2's window: the gang can never start, and the horizon makes the
+        // search terminate.
+        g.set_profile(
+            ids[1],
+            Some(CapacityProfile::daily(vec![(0, r(8)), (100, r(0))])),
+        );
+        assert_eq!(g.match_gang(&r(4), 2, 0, 60, 0), None);
+    }
+
+    #[test]
+    fn gang_commit_is_all_or_nothing() {
+        let (mut g, ids) = nodes_graph(3, 4);
+        let plan = g.match_gang(&r(4), 3, 0, 100, 0).unwrap();
+        let read = g.versions(&plan.0);
+        // A concurrent commit takes n2 inside the gang's window.
+        assert!(g.commit_job(&[ids[2]], &r(4), 50, 10, Some(7), &[]));
+        assert!(!g.commit_job(&plan.0, &r(4), plan.1, 100, Some(1), &read));
+        for &v in &ids[0..2] {
+            assert_eq!(g.vertex(v).planner.span_count(), 0, "no partial booking");
+        }
+        assert_eq!(g.versions(&ids[0..2]), read[0..2].to_vec());
+        // A re-plan lands after the conflict and books every vertex.
+        let plan = g.match_gang(&r(4), 3, 0, 100, 0).unwrap();
+        assert_eq!(plan.1, 60);
+        assert!(g.commit_job(&plan.0, &r(4), plan.1, 100, Some(1), &[]));
+        assert!(ids
+            .iter()
+            .all(|&v| g.vertex(v).planner.job_span(1) == Some((60, 160))));
+        // Listing a vertex twice is rejected outright.
+        assert!(!g.commit_job(&[ids[0], ids[0]], &r(1), 500, 10, Some(2), &[]));
     }
 
     #[test]

@@ -162,3 +162,6 @@ __pycache__/
 
 # Gnomon test kit output
 testkit/out/
+
+# Claude Code agent worktrees (local only)
+.claude/worktrees/

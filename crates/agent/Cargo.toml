@@ -9,3 +9,7 @@ gnomon-core = { path = "../core" }
 tonic = "0.12"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

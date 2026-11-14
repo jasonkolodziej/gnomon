@@ -1,12 +1,14 @@
 //! Raft storage bridging openraft 0.9 to the FSM.
 //!
 //! Implements the v1-style [`RaftStorage`] trait and wraps it in openraft's
-//! [`Adaptor`], which supplies the v2 sealed traits. The log is in-memory in
-//! this skeleton (restart = fresh cluster); persistence is a drop-in change
-//! behind the same trait.
+//! [`Adaptor`], which supplies the v2 sealed traits. [`Store`] keeps the log
+//! in memory (restart = fresh cluster; used by tests and throwaway nodes);
+//! [`DiskStore`](crate::disk::DiskStore) is the durable implementation of the
+//! same trait. Both share the apply path and the snapshot image format below.
 
-use crate::types::{event_of, NodeId, Response, TypeConfig};
-use gnomon_fsm::Fsm;
+use crate::types::{request_of, NodeId, Response, TypeConfig};
+use gnomon_core::StateIndex;
+use gnomon_fsm::{Fsm, State};
 use openraft::entry::RaftPayload;
 use openraft::storage::{Adaptor, RaftLogReader, RaftSnapshotBuilder, RaftStorage};
 use openraft::{
@@ -19,7 +21,7 @@ use std::io::Cursor;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
-type C = TypeConfig;
+pub(crate) type C = TypeConfig;
 
 /// Combined log + state-machine store (RaftStorage v1 style).
 pub struct Store {
@@ -44,8 +46,75 @@ impl Store {
     }
 }
 
-fn io_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> StorageError<NodeId> {
+pub(crate) fn io_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> StorageError<NodeId> {
     StorageIOError::new(ErrorSubject::Store, ErrorVerb::Write, &e).into()
+}
+
+/// Full FSM image carried in a Raft snapshot: the state plus its index, so
+/// installing it reproduces the exact state (fingerprint-equal), not just the
+/// job table. JSON so images written before a `#[serde(default)]` field was
+/// added still load.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct FsmImage {
+    pub index: StateIndex,
+    pub state: State,
+}
+
+/// Serialize the FSM's current state as a snapshot image.
+#[allow(clippy::result_large_err)]
+pub fn encode_image(fsm: &Fsm) -> Result<Vec<u8>, StorageError<NodeId>> {
+    image_bytes(fsm).map_err(io_err)
+}
+
+pub(crate) fn image_bytes(fsm: &Fsm) -> serde_json::Result<Vec<u8>> {
+    let snap = fsm.snapshot();
+    serde_json::to_vec(&FsmImage {
+        index: snap.index,
+        state: snap.state().clone(),
+    })
+}
+
+/// Replace the FSM's state with a snapshot image.
+#[allow(clippy::result_large_err)]
+pub fn restore_image(fsm: &Fsm, data: &[u8]) -> Result<(), StorageError<NodeId>> {
+    let image: FsmImage = serde_json::from_slice(data).map_err(io_err)?;
+    fsm.restore(image.state, image.index);
+    Ok(())
+}
+
+/// The state-machine half shared by both stores: apply committed entries in
+/// log order at their stamped time, tracking last-applied and membership.
+pub(crate) fn apply_entries(
+    fsm: &Fsm,
+    last_applied: &mut Option<LogId<NodeId>>,
+    membership: &mut StoredMembership<NodeId, openraft::BasicNode>,
+    entries: &[Entry<C>],
+) -> Vec<Response> {
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        *last_applied = Some(entry.log_id);
+        if let Some(m) = entry.get_membership() {
+            *membership = StoredMembership::new(Some(entry.log_id), m.clone());
+        }
+        let index = match request_of(entry) {
+            Some(req) => fsm.apply_at(req.event.clone(), req.at).index,
+            None => fsm.index(),
+        };
+        out.push(Response { index });
+    }
+    out
+}
+
+/// Snapshot metadata for a store's current applied position.
+pub(crate) fn snapshot_meta(
+    last_applied: Option<LogId<NodeId>>,
+    membership: &StoredMembership<NodeId, openraft::BasicNode>,
+) -> SnapshotMeta<NodeId, openraft::BasicNode> {
+    SnapshotMeta {
+        last_log_id: last_applied,
+        last_membership: membership.clone(),
+        snapshot_id: format!("snap-{}", last_applied.map(|l| l.index).unwrap_or(0)),
+    }
 }
 
 impl RaftLogReader<C> for Store {
@@ -57,23 +126,18 @@ impl RaftLogReader<C> for Store {
     }
 }
 
+/// In-memory snapshot builder: the image is captured when the builder is
+/// created (under the store's exclusive borrow), so it matches `meta`.
 pub struct SnapBuilder {
-    fsm: Arc<Fsm>,
-    last_applied: Option<LogId<NodeId>>,
-    membership: StoredMembership<NodeId, openraft::BasicNode>,
+    meta: SnapshotMeta<NodeId, openraft::BasicNode>,
+    data: Result<Vec<u8>, StorageError<NodeId>>,
 }
 
 impl RaftSnapshotBuilder<C> for SnapBuilder {
     async fn build_snapshot(&mut self) -> Result<Snapshot<C>, StorageError<NodeId>> {
-        let snap = self.fsm.snapshot();
-        let data = bincode::serialize(&snap.state().jobs).map_err(io_err)?;
-        let meta = SnapshotMeta {
-            last_log_id: self.last_applied,
-            last_membership: self.membership.clone(),
-            snapshot_id: format!("snap-{}", self.last_applied.map(|l| l.index).unwrap_or(0)),
-        };
+        let data = self.data.clone()?;
         Ok(Snapshot {
-            meta,
+            meta: self.meta.clone(),
             snapshot: Box::new(Cursor::new(data)),
         })
     }
@@ -156,29 +220,18 @@ impl RaftStorage<C> for Store {
         &mut self,
         entries: &[Entry<C>],
     ) -> Result<Vec<Response>, StorageError<NodeId>> {
-        let mut out = Vec::new();
-        for entry in entries {
-            self.last_applied = Some(entry.log_id);
-            if let Some(m) = entry.get_membership() {
-                self.membership = StoredMembership::new(Some(entry.log_id), m.clone());
-            }
-            if let Some(ev) = event_of(entry) {
-                let idx = self.fsm.apply(ev.clone());
-                out.push(Response { index: idx });
-            } else {
-                out.push(Response {
-                    index: self.fsm.index(),
-                });
-            }
-        }
-        Ok(out)
+        Ok(apply_entries(
+            &self.fsm,
+            &mut self.last_applied,
+            &mut self.membership,
+            entries,
+        ))
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
         SnapBuilder {
-            fsm: self.fsm.clone(),
-            last_applied: self.last_applied,
-            membership: self.membership.clone(),
+            meta: snapshot_meta(self.last_applied, &self.membership),
+            data: encode_image(&self.fsm),
         }
     }
 
@@ -193,11 +246,7 @@ impl RaftStorage<C> for Store {
         meta: &SnapshotMeta<NodeId, openraft::BasicNode>,
         snapshot: Box<<C as RaftTypeConfig>::SnapshotData>,
     ) -> Result<(), StorageError<NodeId>> {
-        let jobs: BTreeMap<gnomon_core::JobId, gnomon_core::Job> =
-            bincode::deserialize(&snapshot.into_inner()).map_err(io_err)?;
-        for (_, job) in jobs {
-            self.fsm.apply(gnomon_core::Event::JobSubmitted(job));
-        }
+        restore_image(&self.fsm, &snapshot.into_inner())?;
         self.last_applied = meta.last_log_id;
         self.membership = meta.last_membership.clone();
         Ok(())

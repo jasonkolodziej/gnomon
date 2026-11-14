@@ -11,7 +11,8 @@ pub struct Summary {
     pub p95_wait_h: f64,
     /// Mean bounded slowdown, tau = 10 s (Feitelson's standard metric).
     pub mean_bsld: f64,
-    /// Mean wait of "wide" jobs (>= 25% of the machine) — guards against
+    /// Mean wait of "wide" jobs (>= 25% of the machine's cores, counting
+    /// every node of a gang) — guards against
     /// aggressive backfill starving large jobs.
     pub wide_wait_h: f64,
     pub utilization: f64,
@@ -47,7 +48,10 @@ pub fn summarize(r: &SimResult, machine_cores: u32) -> Summary {
         })
         .sum::<f64>()
         / n;
-    let wide: Vec<&Outcome> = o.iter().filter(|x| x.cores * 4 >= machine_cores).collect();
+    let wide: Vec<&Outcome> = o
+        .iter()
+        .filter(|x| x.total_cores() * 4 >= machine_cores as u64)
+        .collect();
     let wide_wait = if wide.is_empty() {
         0.0
     } else {
@@ -60,7 +64,7 @@ pub fn summarize(r: &SimResult, machine_cores: u32) -> Summary {
     let t1 = o.iter().map(|x| x.end).max().unwrap();
     let work: f64 = o
         .iter()
-        .map(|x| (x.end - x.start) as f64 * x.cores as f64)
+        .map(|x| (x.end - x.start) as f64 * x.total_cores() as f64)
         .sum();
     Summary {
         policy: r.policy.clone(),
@@ -95,8 +99,8 @@ pub fn energy(
     // Step function of usage.
     let mut ev: Vec<(u64, i64)> = Vec::new();
     for x in &r.outcomes {
-        ev.push((x.start, x.cores as i64));
-        ev.push((x.end, -(x.cores as i64)));
+        ev.push((x.start, x.total_cores() as i64));
+        ev.push((x.end, -(x.total_cores() as i64)));
     }
     ev.sort();
     let base_r = Resources {
@@ -132,4 +136,57 @@ pub fn energy(
         out.kg_co2 += used as f64 * watts_per_core / 1000.0 * dt * carbon_g_per_kwh[hour] / 1000.0;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gnomon_core::JobId;
+
+    fn outcome(id: u64, cores: u32, nodes: u32) -> Outcome {
+        Outcome {
+            id: JobId(id),
+            submit: 0,
+            start: 3600,
+            end: 7200,
+            cores,
+            walltime: 3600,
+            nodes,
+        }
+    }
+
+    fn result(outcomes: Vec<Outcome>) -> SimResult {
+        SimResult {
+            policy: "p".into(),
+            outcomes,
+            extensions: 0,
+            passes: 0,
+            unplaced: 0,
+            journal: vec![],
+        }
+    }
+
+    #[test]
+    fn gang_jobs_count_every_node_in_wide_and_core_hour_metrics() {
+        // 64-core machine: a 4-core job on 4 nodes is "wide" (16 >= 64/4)
+        // and does 16 core-hours; the same job on one node is neither.
+        let gang = summarize(&result(vec![outcome(1, 4, 4)]), 64);
+        assert_eq!(gang.wide_wait_h, 1.0);
+        assert!((gang.utilization - 16.0 / 128.0).abs() < 1e-9);
+        let single = summarize(&result(vec![outcome(1, 4, 1)]), 64);
+        assert_eq!(single.wide_wait_h, 0.0);
+        assert!((single.utilization - 4.0 / 128.0).abs() < 1e-9);
+        // Energy: 16 cores for an hour against an 8-core cap is 8 core-hours over.
+        let cap = CapacityProfile::daily(vec![(
+            0,
+            Resources {
+                cores: 8,
+                mem_mb: 0,
+                gpus: 0,
+            },
+        )]);
+        let e = energy(&result(vec![outcome(1, 4, 4)]), &cap, 64, &[0.0; 24], 1.0);
+        assert!((e.over_cap_core_h - 8.0).abs() < 1e-9);
+        assert_eq!(e.peak_over_cap_cores, 8);
+    }
 }

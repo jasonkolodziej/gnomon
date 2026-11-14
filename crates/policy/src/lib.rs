@@ -71,9 +71,11 @@ impl PolicyConfig {
     }
 
     /// Pure priority function: age + size + QoS (a Slurm multifactor subset).
+    /// Size counts the whole job: a gang's `request` is per node.
     pub fn priority(&self, job: &Job, now: u64, qos: &str) -> u64 {
         let age = now.saturating_sub(job.submit_time) / 60; // minutes waited
-        let size = (job.request.cores as u64) + 4 * (job.request.gpus as u64);
+        let n = u64::from(job.node_count());
+        let size = n * (u64::from(job.request.cores) + 4 * u64::from(job.request.gpus));
         let qos_boost = self
             .qos_tiers
             .iter()
@@ -83,13 +85,19 @@ impl PolicyConfig {
         self.weight_age * age + self.weight_jobsize * size + self.weight_qos * qos_boost / 1000
     }
 
-    /// Admission check against per-partition limits.
+    /// Admission check against per-partition limits. A gang uses `request` on
+    /// each of its nodes, so it counts `nodes x request` against the limits.
     pub fn admits(&self, job: &Job, user_running: u32, user_usage: &Resources) -> bool {
+        let n = job.node_count();
+        let (cores, gpus) = (
+            job.request.cores.saturating_mul(n),
+            job.request.gpus.saturating_mul(n),
+        );
         match self.partitions.iter().find(|p| p.name == job.partition) {
             Some(lim) => {
                 user_running < lim.max_running_jobs_per_user
-                    && user_usage.cores + job.request.cores <= lim.max_cores_per_user
-                    && user_usage.gpus + job.request.gpus <= lim.max_gpus_per_user
+                    && user_usage.cores.saturating_add(cores) <= lim.max_cores_per_user
+                    && user_usage.gpus.saturating_add(gpus) <= lim.max_gpus_per_user
             }
             None => true,
         }
@@ -160,6 +168,34 @@ mod tests {
             }
         ));
         assert!(!cfg.admits(&j, 200, &Resources::default())); // running-jobs limit
+    }
+
+    #[test]
+    fn gangs_count_every_node_in_size_and_limits() {
+        let cfg = PolicyConfig::default();
+        let mut j = Job::new(
+            JobId(1),
+            "mpi",
+            "u",
+            Resources {
+                cores: 64,
+                mem_mb: 0,
+                gpus: 0,
+            },
+            Walltime(Duration::from_secs(3600)),
+        );
+        j.submit_time = 0;
+        let single = cfg.priority(&j, 0, "normal");
+        j.nodes = 4;
+        assert_eq!(cfg.priority(&j, 0, "normal"), 4 * single);
+        // 4 x 64 = 256 cores: admitted with 256 in use (512 limit), refused with 257.
+        let used = |cores| Resources {
+            cores,
+            mem_mb: 0,
+            gpus: 0,
+        };
+        assert!(cfg.admits(&j, 0, &used(256)));
+        assert!(!cfg.admits(&j, 0, &used(257)));
     }
 
     #[test]
