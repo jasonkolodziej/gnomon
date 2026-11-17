@@ -2,7 +2,8 @@
 //! traces from the Parallel Workloads Archive (SWF).
 //!
 //! usage: `experiments <dir-with-swf-traces> <out-dir> [jobs-per-window]
-//! [--only e0|e1|e2|e3|e4] [--priority-plugin candidate.wasm]`
+//! [--only e0|e1|e2|e3|e4] [--admission-plugin a.wasm] [--priority-plugin
+//! p.wasm] [--estimator-plugin e.wasm]`
 //!
 //! E0  exact replay: journal -> identical state; recovered history under the
 //!     same policy -> identical start times.
@@ -12,17 +13,21 @@
 //! E2  time-varying capacity: power cap and carbon windows, planner-aware vs
 //!     planner-unaware.
 //! E3  shadow mode on live traffic.
-//! E4  candidate priority plugin (only with `--priority-plugin`): every
-//!     trace window scheduled under FCFS priorities and under the plugin's
-//!     submit-time priorities (ADR 0002, step 4).
+//! E4  candidate plugins (only with a `--*-plugin` flag): every trace
+//!     window scheduled as-is (FCFS, walltime spans) and with the plugins:
+//!     admission and priority at submit time, the estimator's spans while
+//!     planning (ADR 0002, 0003). Node scoring needs a multi-node machine and
+//!     is benchmarked by `gnomon-policy`'s `plugin_bench` instead.
 
 use gnomon_core::{CapacityProfile, Job, JobId, Resources};
-use gnomon_policy::{PluginLimits, PriorityPlugin};
+use gnomon_policy::{
+    AdmissionPlugin, EstimatorPlugin, PluginLimits, PriorityPlugin, Verdict, WasmEstimator,
+};
 use gnomon_sched::{
     BackfillPolicy, BiasConfig, BiasCorrectedEstimator, GuardMode, NarrowAhead, Policy,
     QuantileEstimator, RuntimeEstimator, ShadowPolicy, WideSafeBackfill,
 };
-use gnomon_sim::{metrics, priority, replay, swf, Machine, SimJob, Simulator};
+use gnomon_sim::{metrics, replay, submit, swf, Machine, SimJob, Simulator};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -130,6 +135,112 @@ const CARBON: [f64; 24] = [
     340., 430., 520., 560., 550., 530., 510., 495.,
 ];
 
+/// Plugin paths given for E4.
+struct Candidates {
+    admission: Option<String>,
+    priority: Option<String>,
+    estimator: Option<String>,
+}
+
+/// Loaded E4 plugins. The estimator is kept as bytes: each simulation gets
+/// a fresh [`WasmEstimator`], whose cache is keyed by job id.
+struct Loaded {
+    label: String,
+    admission: Option<AdmissionPlugin>,
+    priority: Option<PriorityPlugin>,
+    estimator: Option<Vec<u8>>,
+}
+
+impl Candidates {
+    fn load(&self) -> Result<Option<Loaded>, String> {
+        let l = PluginLimits::default();
+        let err = |flag: &str, p: &str, e: &dyn std::fmt::Display| format!("{flag} {p}: {e}");
+        let admission = match &self.admission {
+            Some(p) => Some(
+                AdmissionPlugin::from_file(p, l).map_err(|e| err("--admission-plugin", p, &e))?,
+            ),
+            None => None,
+        };
+        let priority = match &self.priority {
+            Some(p) => {
+                Some(PriorityPlugin::from_file(p, l).map_err(|e| err("--priority-plugin", p, &e))?)
+            }
+            None => None,
+        };
+        let estimator = match &self.estimator {
+            Some(p) => {
+                let bytes = std::fs::read(p).map_err(|e| err("--estimator-plugin", p, &e))?;
+                EstimatorPlugin::from_bytes(&bytes, l)
+                    .map_err(|e| err("--estimator-plugin", p, &e))?;
+                Some(bytes)
+            }
+            None => None,
+        };
+        let parts: Vec<String> = [
+            ("admission", &self.admission),
+            ("priority", &self.priority),
+            ("estimator", &self.estimator),
+        ]
+        .into_iter()
+        .filter_map(|(k, p)| p.as_ref().map(|p| format!("{k} `{p}`")))
+        .collect();
+        Ok((!parts.is_empty()).then(|| Loaded {
+            label: parts.join(", "),
+            admission,
+            priority,
+            estimator,
+        }))
+    }
+}
+
+impl Loaded {
+    /// `w` as the controller would have admitted and prioritized it, with
+    /// the number of plugin failures (admission fails open, priority to
+    /// FCFS's 0, as configured by default).
+    fn prepare(&self, w: &mut Vec<SimJob>) -> (submit::Admitted, u64) {
+        let mut failures = 0u64;
+        let admitted = match &self.admission {
+            Some(a) => submit::admit(w, |j, now| match a.admit(j, now) {
+                Ok(Verdict::Accept) => Ok(()),
+                Ok(Verdict::Reject(r)) => Err(r),
+                Ok(Verdict::Rewrite(r)) => {
+                    r.apply(j);
+                    Ok(())
+                }
+                Err(_) => {
+                    failures += 1;
+                    Ok(())
+                }
+            }),
+            None => submit::Admitted::default(),
+        };
+        if let Some(p) = &self.priority {
+            submit::assign(w, |j, now| {
+                p.priority(j, now).unwrap_or_else(|_| {
+                    failures += 1;
+                    0
+                })
+            });
+        }
+        (admitted, failures)
+    }
+
+    fn policy(&self) -> (Arc<dyn Policy>, Option<Arc<WasmEstimator>>) {
+        match &self.estimator {
+            Some(bytes) => {
+                let p = EstimatorPlugin::from_bytes(bytes, PluginLimits::default())
+                    .expect("loaded once already");
+                let est = Arc::new(WasmEstimator::new(p));
+                (
+                    Arc::new(BackfillPolicy::with_estimator(WINDOW_SECS, est.clone())),
+                    Some(est),
+                )
+            }
+            None => (Arc::new(BackfillPolicy::new(WINDOW_SECS)), None),
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args: Vec<String> = std::env::args().collect();
     let only = match args.iter().position(|a| a == "--only") {
@@ -140,17 +251,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => None,
     };
-    let plugin = match args.iter().position(|a| a == "--priority-plugin") {
-        Some(i) if i + 1 < args.len() => {
-            let path = args.remove(i + 1);
-            args.remove(i);
-            let p = PriorityPlugin::from_file(&path, PluginLimits::default())
-                .map_err(|e| format!("--priority-plugin {path}: {e}"))?;
-            Some((path, p))
+    let mut take_path = |flag: &str| -> Result<Option<String>, String> {
+        match args.iter().position(|a| a == flag) {
+            Some(i) if i + 1 < args.len() => {
+                let path = args.remove(i + 1);
+                args.remove(i);
+                Ok(Some(path))
+            }
+            Some(_) => Err(format!("{flag} needs a path")),
+            None => Ok(None),
         }
-        Some(_) => return Err("--priority-plugin needs a path".into()),
-        None => None,
     };
+    let candidates = Candidates {
+        admission: take_path("--admission-plugin")?,
+        priority: take_path("--priority-plugin")?,
+        estimator: take_path("--estimator-plugin")?,
+    };
+    let loaded = candidates.load()?;
     let run = |e: &str| only.as_deref().is_none_or(|o| o == e);
     let dir = args
         .get(1)
@@ -453,36 +570,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             agreement * 100.0
         );
     }
-    // ---------------- E4: candidate priority plugin ----------------------
-    if let Some((path, plugin)) = plugin.as_ref().filter(|_| run("e4")) {
-        let mut csv4 = String::from("trace,offset,priorities,jobs,mean_wait_h,p95_wait_h,mean_bsld,wide_wait_h,utilization,fcfs_agreement,plugin_failures\n");
-        writeln!(md, "## E4 — priority plugin `{path}` vs FCFS\n").unwrap();
-        writeln!(md, "| trace @offset | priorities | mean wait h | p95 wait h | mean bsld | wide wait h | FCFS pair agreement | plugin failures |\n|---|---|---|---|---|---|---|---|").unwrap();
+    // ---------------- E4: candidate plugins ------------------------------
+    if let Some(cand) = loaded.as_ref().filter(|_| run("e4")) {
+        let mut csv4 = String::from("trace,offset,variant,jobs,rejected,rewritten,mean_wait_h,p95_wait_h,mean_bsld,wide_wait_h,utilization,fcfs_agreement,plugin_failures\n");
+        writeln!(
+            md,
+            "## E4 — candidate plugins ({}) vs FCFS and walltime spans\n",
+            cand.label
+        )
+        .unwrap();
+        writeln!(md, "| trace @offset | variant | jobs | rejected | rewritten | mean wait h | p95 wait h | mean bsld | wide wait h | FCFS pair agreement | plugin failures |\n|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
         for t in &traces {
             for &off in &offsets {
-                let fcfs = t.window(off, n);
-                let mut cand = fcfs.clone();
-                let mut failures = 0u64;
-                // As the controller does: plugin at submit time, FCFS (0) on failure.
-                priority::assign(&mut cand, |j, now| {
-                    plugin.priority(j, now).unwrap_or_else(|_| {
-                        failures += 1;
-                        0
-                    })
-                });
-                for (label, w, fails) in [("fcfs", &fcfs, 0), ("plugin", &cand, failures)] {
-                    let mut sim = Simulator::new(
-                        Machine::single(t.max_procs),
-                        Arc::new(BackfillPolicy::new(WINDOW_SECS)),
-                    );
+                let base = t.window(off, n);
+                let mut with = base.clone();
+                let (admitted, fails) = cand.prepare(&mut with);
+                let variants = [
+                    ("baseline", &base, submit::Admitted::default(), 0, None),
+                    ("plugins", &with, admitted, fails, Some(cand)),
+                ];
+                for (label, w, adm, prep_fails, plugins) in variants {
+                    let (policy, est) = match plugins {
+                        Some(c) => c.policy(),
+                        None => (
+                            Arc::new(BackfillPolicy::new(WINDOW_SECS)) as Arc<dyn Policy>,
+                            None,
+                        ),
+                    };
+                    let mut sim = Simulator::new(Machine::single(t.max_procs), policy);
                     sim.record = false;
                     let s = metrics::summarize(&sim.run(w), t.max_procs);
-                    let agree = priority::fcfs_agreement(w);
+                    let agree = submit::fcfs_agreement(w);
+                    let fails = prep_fails
+                        + est.map_or(0, |e| e.failures.load(std::sync::atomic::Ordering::Relaxed));
                     writeln!(
                         csv4,
-                        "{},{off},{label},{},{:.4},{:.4},{:.3},{:.4},{:.4},{agree:.4},{fails}",
+                        "{},{off},{label},{},{},{},{:.4},{:.4},{:.3},{:.4},{:.4},{agree:.4},{fails}",
                         t.name,
                         s.jobs,
+                        adm.rejected,
+                        adm.rewritten,
                         s.mean_wait_h,
                         s.p95_wait_h,
                         s.mean_bsld,
@@ -492,13 +619,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap();
                     writeln!(
                         md,
-                        "| {} @{off} | {label} | {:.2} | {:.2} | {:.1} | {:.2} | {:.1}% | {fails} |",
-                        t.name, s.mean_wait_h, s.p95_wait_h, s.mean_bsld, s.wide_wait_h, agree * 100.0
+                        "| {} @{off} | {label} | {} | {} | {} | {:.2} | {:.2} | {:.1} | {:.2} | {:.1}% | {fails} |",
+                        t.name, s.jobs, adm.rejected, adm.rewritten, s.mean_wait_h, s.p95_wait_h,
+                        s.mean_bsld, s.wide_wait_h, agree * 100.0
                     )
                     .unwrap();
                     eprintln!(
-                        "E4 {} @{off} {label}: wait {:.2}h bsld {:.1} agreement {:.1}%",
+                        "E4 {} @{off} {label}: {} jobs, wait {:.2}h bsld {:.1} agreement {:.1}%",
                         t.name,
+                        s.jobs,
                         s.mean_wait_h,
                         s.mean_bsld,
                         agree * 100.0
@@ -507,9 +636,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         writeln!(md).unwrap();
-        std::fs::write(format!("{out}/e4_priority_plugin.csv"), &csv4)?;
+        std::fs::write(format!("{out}/e4_plugins.csv"), &csv4)?;
     }
-    if run("e0") || run("e3") || (plugin.is_some() && run("e4")) {
+    if run("e0") || run("e3") || (loaded.is_some() && run("e4")) {
         std::fs::write(format!("{out}/SUMMARY_raw.md"), md)?;
     }
     Ok(())

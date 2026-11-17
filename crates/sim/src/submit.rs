@@ -1,10 +1,11 @@
-//! Offline evaluation of priority functions, such as a candidate WASM
-//! priority plugin (ADR 0002, step 4), on recorded or SWF workloads.
+//! Offline evaluation of submit-time policy, such as candidate WASM
+//! admission and priority plugins (ADR 0002, 0003), on recorded or SWF
+//! workloads.
 //!
-//! The controller computes a job's priority once, at submit time, and
-//! records it in `JobSubmitted`; [`assign`] does the same for a workload,
-//! so the [`Simulator`](crate::Simulator) then schedules it exactly as the
-//! controller would have.
+//! The controller admits a job and computes its priority once, at submit
+//! time, and records the result in `JobSubmitted`; [`admit`] and [`assign`]
+//! do the same for a workload, so the [`Simulator`](crate::Simulator) then
+//! schedules it exactly as the controller would have.
 
 use crate::SimJob;
 use gnomon_core::Job;
@@ -15,6 +16,38 @@ pub fn assign(workload: &mut [SimJob], mut priority: impl FnMut(&Job, u64) -> u6
     for w in workload {
         w.job.priority = priority(&w.job, w.job.submit_time);
     }
+}
+
+/// What [`admit`] did to a workload.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Admitted {
+    pub rejected: usize,
+    pub rewritten: usize,
+}
+
+/// Run `admission(job, submit_time)` on every job, as the submit handler
+/// would: rejected jobs (`Err`) are dropped, rewritten ones kept as
+/// rewritten. A rewrite that shortens the walltime also shortens the actual
+/// runtime, since the walltime is the kill limit.
+pub fn admit(
+    workload: &mut Vec<SimJob>,
+    mut admission: impl FnMut(&mut Job, u64) -> Result<(), String>,
+) -> Admitted {
+    let mut out = Admitted::default();
+    workload.retain_mut(|w| {
+        let before = w.job.clone();
+        let submitted = w.job.submit_time;
+        if admission(&mut w.job, submitted).is_err() {
+            out.rejected += 1;
+            return false;
+        }
+        if w.job != before {
+            out.rewritten += 1;
+            w.actual = w.actual.min(w.job.walltime.secs()).max(1);
+        }
+        true
+    });
+    out
 }
 
 /// Fraction of job pairs that the priorities leave in first-come,
@@ -70,6 +103,28 @@ mod tests {
         assert_eq!(fcfs_agreement(&w), 1.0); // all priority 0: FCFS
         w[2].job.priority = 5; // job 3 now jumps both earlier jobs
         assert!((fcfs_agreement(&w) - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn admission_drops_rejected_jobs_and_clips_rewritten_runtimes() {
+        let mut w = vec![sim_job(1, 0, 1), sim_job(2, 10, 64), sim_job(3, 20, 2)];
+        let r = admit(&mut w, |j, _| match j.request.cores {
+            64 => Err("too big".into()),
+            2 => {
+                j.walltime = Walltime(Duration::from_secs(300));
+                Ok(())
+            }
+            _ => Ok(()),
+        });
+        assert_eq!(
+            r,
+            Admitted {
+                rejected: 1,
+                rewritten: 1
+            }
+        );
+        assert_eq!(w.iter().map(|s| s.job.id.0).collect::<Vec<_>>(), [1, 3]);
+        assert_eq!((w[0].actual, w[1].actual), (1000, 300));
     }
 
     #[test]
