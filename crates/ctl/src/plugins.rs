@@ -229,10 +229,11 @@ impl SubmitPolicy for SubmitChain {
             if outcome != ShadowOutcome::Same && (n <= 10 || n.is_power_of_two()) {
                 eprintln!(
                     "gnomon-ctl: shadow priority on job {} ({}): {outcome:?}; \
-                     agreement {:.1}% over {n} submissions",
+                     agreement {:.1}% over {n} submissions ({} failed)",
                     job.id.0,
                     job.priority,
-                    s.agreement() * 100.0
+                    s.agreement() * 100.0,
+                    s.failures.load(Ordering::Relaxed),
                 );
             }
         }

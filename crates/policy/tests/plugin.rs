@@ -161,4 +161,6 @@ fn shadow_priority_counts_disagreements_without_applying() {
     assert!((shadow.agreement() - 0.5).abs() < 1e-9);
     let broken = ShadowPriority::new(load(&fixtures::trap()));
     assert!(matches!(broken.compare(&j, 0), ShadowOutcome::Failed(_)));
+    assert_eq!(broken.agreement(), 0.0, "failures are not agreement");
+    assert_eq!(broken.failures.load(Ordering::Relaxed), 1);
 }

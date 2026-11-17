@@ -119,9 +119,13 @@ impl ShadowPriority {
         }
     }
 
-    /// Fraction of compared submissions where the candidate agreed.
+    /// Fraction of compared submissions where the candidate returned the
+    /// live priority. A failed call is not agreement, so a candidate that
+    /// always traps scores 0, not 1.
     pub fn agreement(&self) -> f64 {
-        let n = self.compared.load(Ordering::Relaxed).max(1) as f64;
-        1.0 - self.differed.load(Ordering::Relaxed) as f64 / n
+        let n = self.compared.load(Ordering::Relaxed);
+        let disagreed =
+            self.differed.load(Ordering::Relaxed) + self.failures.load(Ordering::Relaxed);
+        n.saturating_sub(disagreed) as f64 / n.max(1) as f64
     }
 }
