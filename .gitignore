@@ -165,3 +165,7 @@ testkit/out/
 
 # Claude Code agent worktrees (local only)
 .claude/worktrees/
+
+# Example WASM priority plugin build output
+/examples/priority-plugin/target/
+/examples/priority-plugin/*.wasm

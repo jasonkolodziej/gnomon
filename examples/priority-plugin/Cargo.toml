@@ -1,0 +1,18 @@
+[package]
+name = "gnomon-priority-plugin-example"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Example Gnomon priority plugin (WIT world gnomon:policy/priority)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.43"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
