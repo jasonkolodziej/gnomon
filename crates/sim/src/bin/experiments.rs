@@ -21,7 +21,8 @@
 
 use gnomon_core::{CapacityProfile, Job, JobId, Resources};
 use gnomon_policy::{
-    AdmissionPlugin, EstimatorPlugin, PluginLimits, PriorityPlugin, Verdict, WasmEstimator,
+    AdmissionPlugin, EstimatorPlugin, PluginLimits, PolicyConfig, PriorityHook, PriorityPlugin,
+    Verdict, WasmEstimator,
 };
 use gnomon_sched::{
     BackfillPolicy, BiasConfig, BiasCorrectedEstimator, GuardMode, NarrowAhead, Policy,
@@ -147,7 +148,7 @@ struct Candidates {
 struct Loaded {
     label: String,
     admission: Option<AdmissionPlugin>,
-    priority: Option<PriorityPlugin>,
+    priority: Option<PriorityHook>,
     estimator: Option<Vec<u8>>,
 }
 
@@ -163,7 +164,14 @@ impl Candidates {
         };
         let priority = match &self.priority {
             Some(p) => {
-                Some(PriorityPlugin::from_file(p, l).map_err(|e| err("--priority-plugin", p, &e))?)
+                Some(PriorityHook::new(
+                    Some(
+                        PriorityPlugin::from_file(p, l)
+                            .map_err(|e| err("--priority-plugin", p, &e))?,
+                    ),
+                    // The controller's fallback without `--policy-config`.
+                    PolicyConfig::default(),
+                ))
             }
             None => None,
         };
@@ -195,8 +203,9 @@ impl Candidates {
 
 impl Loaded {
     /// `w` as the controller would have admitted and prioritized it, with
-    /// the number of plugin failures (admission fails open, priority to
-    /// FCFS's 0, as configured by default).
+    /// the number of plugin failures. Failures fall back as the controller's
+    /// defaults do: admission fails open, and priority falls back to the
+    /// default declarative `PolicyConfig` priority.
     fn prepare(&self, w: &mut Vec<SimJob>) -> (submit::Admitted, u64) {
         let mut failures = 0u64;
         let admitted = match &self.admission {
@@ -216,10 +225,9 @@ impl Loaded {
         };
         if let Some(p) = &self.priority {
             submit::assign(w, |j, now| {
-                p.priority(j, now).unwrap_or_else(|_| {
-                    failures += 1;
-                    0
-                })
+                let (v, err) = p.priority(j, now);
+                failures += u64::from(err.is_some());
+                v
             });
         }
         (admitted, failures)
@@ -572,14 +580,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // ---------------- E4: candidate plugins ------------------------------
     if let Some(cand) = loaded.as_ref().filter(|_| run("e4")) {
-        let mut csv4 = String::from("trace,offset,variant,jobs,rejected,rewritten,mean_wait_h,p95_wait_h,mean_bsld,wide_wait_h,utilization,fcfs_agreement,plugin_failures\n");
+        let mut csv4 = String::from("trace,offset,variant,jobs,rejected,rewritten,unplaced,mean_wait_h,p95_wait_h,mean_bsld,wide_wait_h,utilization,fcfs_agreement,plugin_failures\n");
         writeln!(
             md,
             "## E4 — candidate plugins ({}) vs FCFS and walltime spans\n",
             cand.label
         )
         .unwrap();
-        writeln!(md, "| trace @offset | variant | jobs | rejected | rewritten | mean wait h | p95 wait h | mean bsld | wide wait h | FCFS pair agreement | plugin failures |\n|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
+        writeln!(md, "| trace @offset | variant | jobs | rejected | rewritten | unplaced | mean wait h | p95 wait h | mean bsld | wide wait h | FCFS pair agreement | plugin failures |\n|---|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
         for t in &traces {
             for &off in &offsets {
                 let base = t.window(off, n);
@@ -605,11 +613,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         + est.map_or(0, |e| e.failures.load(std::sync::atomic::Ordering::Relaxed));
                     writeln!(
                         csv4,
-                        "{},{off},{label},{},{},{},{:.4},{:.4},{:.3},{:.4},{:.4},{agree:.4},{fails}",
+                        "{},{off},{label},{},{},{},{},{:.4},{:.4},{:.3},{:.4},{:.4},{agree:.4},{fails}",
                         t.name,
                         s.jobs,
                         adm.rejected,
                         adm.rewritten,
+                        s.unplaced,
                         s.mean_wait_h,
                         s.p95_wait_h,
                         s.mean_bsld,
@@ -619,8 +628,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap();
                     writeln!(
                         md,
-                        "| {} @{off} | {label} | {} | {} | {} | {:.2} | {:.2} | {:.1} | {:.2} | {:.1}% | {fails} |",
-                        t.name, s.jobs, adm.rejected, adm.rewritten, s.mean_wait_h, s.p95_wait_h,
+                        "| {} @{off} | {label} | {} | {} | {} | {} | {:.2} | {:.2} | {:.1} | {:.2} | {:.1}% | {fails} |",
+                        t.name, s.jobs, adm.rejected, adm.rewritten, s.unplaced, s.mean_wait_h, s.p95_wait_h,
                         s.mean_bsld, s.wide_wait_h, agree * 100.0
                     )
                     .unwrap();
@@ -632,10 +641,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         s.mean_bsld,
                         agree * 100.0
                     );
+                    if s.unplaced > 0 {
+                        eprintln!(
+                            "E4 {} @{off} {label}: {} accepted jobs never ran (more than the \
+                             trace machine can hold); the wait metrics cover completed jobs only",
+                            t.name, s.unplaced
+                        );
+                    }
                 }
             }
         }
-        writeln!(md).unwrap();
+        writeln!(
+            md,
+            "\n`unplaced` jobs were accepted but never ran, typically because admission rewrote \
+             them to need more than the trace machine has. The wait and slowdown columns cover \
+             completed jobs only, so compare variants only when `unplaced` is 0 for both.\n"
+        )
+        .unwrap();
         std::fs::write(format!("{out}/e4_plugins.csv"), &csv4)?;
     }
     if run("e0") || run("e3") || (loaded.is_some() && run("e4")) {
