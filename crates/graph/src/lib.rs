@@ -172,6 +172,25 @@ impl Planner {
             .fold(Resources::default(), |u, s| u.add(&s.res))
     }
 
+    /// Largest use of each resource at any instant of `[from, to)` (per
+    /// resource, so the maxima may come from different instants). Usage only
+    /// rises where a span starts, so `from` and those starts suffice.
+    pub fn peak_usage(&self, from: u64, to: u64) -> Resources {
+        std::iter::once(from)
+            .chain(
+                self.spans
+                    .iter()
+                    .map(|s| s.start)
+                    .filter(|&t| from < t && t < to),
+            )
+            .map(|t| self.usage_at(t))
+            .fold(Resources::default(), |m, u| Resources {
+                cores: m.cores.max(u.cores),
+                mem_mb: m.mem_mb.max(u.mem_mb),
+                gpus: m.gpus.max(u.gpus),
+            })
+    }
+
     /// Reserve `[start, start+dur)` consuming `req`. Returns false on conflict
     /// (used by the plan applier for commit-time revalidation — report 5.2).
     pub fn reserve(&mut self, cap: CapView, req: &Resources, start: u64, dur: u64) -> bool {
@@ -683,6 +702,30 @@ mod tests {
             );
         }
         g
+    }
+
+    #[test]
+    fn peak_usage_is_the_per_resource_maximum_over_the_window() {
+        let cap = CapView {
+            base: Resources {
+                cores: 8,
+                mem_mb: 100,
+                gpus: 0,
+            },
+            profile: None,
+        };
+        let r = |cores, mem_mb| Resources {
+            cores,
+            mem_mb,
+            gpus: 0,
+        };
+        let mut p = Planner::default();
+        assert!(p.reserve(cap, &r(2, 50), 0, 100)); // [0, 100)
+        assert!(p.reserve(cap, &r(4, 10), 50, 100)); // [50, 150)
+        assert_eq!(p.peak_usage(0, 50), r(2, 50));
+        assert_eq!(p.peak_usage(0, 200), r(6, 60));
+        assert_eq!(p.peak_usage(100, 200), r(4, 10));
+        assert_eq!(p.peak_usage(150, 200), r(0, 0));
     }
 
     #[test]
