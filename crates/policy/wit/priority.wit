@@ -1,0 +1,28 @@
+/// Gnomon scheduling-policy plugins (ADR 0002).
+///
+/// Plugins are pure functions: the worlds import nothing (no WASI, no host
+/// functions), so a plugin sees only its arguments. Time is passed in as
+/// `now` (Unix seconds); the plugin must not need a clock.
+package gnomon:policy@0.1.0;
+
+interface types {
+  /// The job as submitted. `cores`, `mem-mb` and `gpus` are per node;
+  /// `nodes` is the gang size (at least 1).
+  record job {
+    id: u64,
+    user: string,
+    partition: string,
+    cores: u32,
+    mem-mb: u64,
+    gpus: u32,
+    nodes: u32,
+    walltime-secs: u64,
+    submit-time: u64,
+  }
+}
+
+/// Priority plugin: a higher value is scheduled earlier.
+world priority {
+  use types.{job};
+  export priority: func(job: job, now: u64) -> u64;
+}
