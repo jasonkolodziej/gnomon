@@ -23,7 +23,7 @@ pub mod priority;
 
 use std::path::Path;
 use wasmtime::component::{Component, InstancePre, Linker};
-use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{Config, Engine, ResourceLimiter, Store};
 
 mod bindings {
     pub mod priority {
@@ -63,7 +63,8 @@ const TYPES_INTERFACE: &str = "gnomon:policy/types@0.1.0";
 pub struct PluginLimits {
     /// Fuel per call; roughly one unit per executed WASM instruction.
     pub fuel: u64,
-    /// Cap on the plugin's linear memory, in bytes.
+    /// Cap on the plugin's linear memory, in bytes, summed over every memory
+    /// the component instantiates.
     pub max_memory_bytes: usize,
 }
 
@@ -108,7 +109,77 @@ impl std::error::Error for PluginError {}
 
 /// Store data: only the resource limiter. Plugins get no host state.
 struct Host {
-    limits: StoreLimits,
+    budget: Budget,
+}
+
+/// Table elements a call may allocate across all its tables. A `funcref`
+/// table needs a few for indirect calls; nothing legitimate needs more.
+const MAX_TABLE_ELEMENTS: usize = 64 * 1024;
+/// Caps on how many instances, memories and tables one call may create.
+/// Compiled plugins use one memory and a handful of core instances.
+const MAX_INSTANCES: usize = 32;
+const MAX_MEMORIES: usize = 4;
+const MAX_TABLES: usize = 8;
+
+/// The store's resource limiter. Wasmtime's `StoreLimits` caps each memory
+/// separately, so a component with several memories (or a huge table) could
+/// still allocate far more than `max_memory_bytes`. This budget is shared by
+/// every memory and table in the store, and a growth past it traps.
+struct Budget {
+    memory_left: usize,
+    table_elements_left: usize,
+}
+
+impl Budget {
+    fn new(limits: &PluginLimits) -> Self {
+        Budget {
+            memory_left: limits.max_memory_bytes,
+            table_elements_left: MAX_TABLE_ELEMENTS,
+        }
+    }
+
+    fn take(left: &mut usize, current: usize, desired: usize, what: &str) -> anyhow::Result<bool> {
+        let extra = desired.saturating_sub(current);
+        match left.checked_sub(extra) {
+            Some(rest) => {
+                *left = rest;
+                Ok(true)
+            }
+            None => anyhow::bail!("plugin {what} budget exceeded"),
+        }
+    }
+}
+
+impl ResourceLimiter for Budget {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
+        Self::take(&mut self.memory_left, current, desired, "memory")
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
+        Self::take(&mut self.table_elements_left, current, desired, "table")
+    }
+
+    fn instances(&self) -> usize {
+        MAX_INSTANCES
+    }
+
+    fn memories(&self) -> usize {
+        MAX_MEMORIES
+    }
+
+    fn tables(&self) -> usize {
+        MAX_TABLES
+    }
 }
 
 /// The engine configuration of Rules 2 and 3.
@@ -174,12 +245,9 @@ impl<P> Sandbox<P> {
         &self,
         f: impl FnOnce(&mut Store<Host>, &P) -> anyhow::Result<R>,
     ) -> Result<R, PluginError> {
-        let limits = StoreLimitsBuilder::new()
-            .memory_size(self.limits.max_memory_bytes)
-            .trap_on_grow_failure(true)
-            .build();
-        let mut store = Store::new(&self.engine, Host { limits });
-        store.limiter(|h| &mut h.limits);
+        let budget = Budget::new(&self.limits);
+        let mut store = Store::new(&self.engine, Host { budget });
+        store.limiter(|h| &mut h.budget);
         store
             .set_fuel(self.limits.fuel)
             .map_err(PluginError::Trap)?;

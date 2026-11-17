@@ -83,6 +83,16 @@ fn memory_past_the_cap_traps() {
 }
 
 #[test]
+fn the_memory_cap_covers_all_memories_and_tables() {
+    for wat in [fixtures::split_memory(), fixtures::table_bomb()] {
+        match load(&wat).priority(&job(), 0) {
+            Err(PluginError::Trap(e)) => assert!(format!("{e:#}").contains("budget"), "{e:#}"),
+            other => panic!("expected a budget trap, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn traps_are_reported() {
     let p = load(&fixtures::trap());
     assert!(matches!(p.priority(&job(), 0), Err(PluginError::Trap(_))));

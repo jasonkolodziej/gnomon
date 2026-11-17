@@ -137,6 +137,28 @@ pub fn big_initial_memory() -> String {
 }
 
 /// Traps immediately.
+/// Each of two memories fits the default 16 MiB cap; together they do not.
+pub fn split_memory() -> String {
+    with_extra_module("(memory 160)", &priority_component("(i64.const 0)", 160))
+}
+
+/// One memory page, but a million-element table.
+pub fn table_bomb() -> String {
+    with_extra_module(
+        "(table 1000000 funcref)",
+        &priority_component("(i64.const 0)", 1),
+    )
+}
+
+/// Instantiate one more core module (holding `item`) beside the plugin's own.
+fn with_extra_module(item: &str, component: &str) -> String {
+    component.replacen(
+        "  (core instance $i (instantiate $m))",
+        &format!("  (core module $extra {item})\n  (core instance $x (instantiate $extra))\n  (core instance $i (instantiate $m))"),
+        1,
+    )
+}
+
 pub fn trap() -> String {
     priority_component("(unreachable)", 1)
 }

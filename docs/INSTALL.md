@@ -354,7 +354,7 @@ gnomon-ctl --demo        # in-process demo: submits a few jobs and prints the pl
 | `--node-score-plugin FILE` | `GNOMON_NODE_SCORE_PLUGIN` | none | chooses among the nodes a job could use at its planned start |
 | `--node-score-candidates N` | `GNOMON_NODE_SCORE_CANDIDATES` | `64` | most nodes offered per node-score call besides the default choice, or `all` |
 | `--plugin-fuel N` | `GNOMON_PLUGIN_FUEL` | `10000000` | instruction budget per plugin call |
-| `--plugin-memory-mb N` | `GNOMON_PLUGIN_MEMORY_MB` | `16` | linear-memory cap per plugin call |
+| `--plugin-memory-mb N` | `GNOMON_PLUGIN_MEMORY_MB` | `16` | linear-memory cap per plugin call, summed over all of the plugin's memories |
 
 Flags win over environment variables. A flag given without a value is an error rather than a silent
 fallback (a typo must not quietly disable durability). The controller logs to stdout/stderr.

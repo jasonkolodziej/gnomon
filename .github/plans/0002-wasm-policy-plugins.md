@@ -76,7 +76,7 @@ gives the same output on x86_64 and aarch64, which `gnomon-sim` relies on to eva
 offline.
 
 **Rule 3: bounded cost, safe fallback.** Every call has a fuel budget (`Config::consume_fuel`) and a
-`StoreLimits` memory cap, both configurable. Out of fuel, out of memory, a trap or a load error falls
+memory cap, both configurable. Out of fuel, out of memory, a trap or a load error falls
 back to the declarative `PolicyConfig` result and is logged and counted. A plugin can make decisions
 worse; it cannot stop scheduling.
 
@@ -155,8 +155,10 @@ All five steps are implemented. Where the code differs from the text above:
 - **Steps 1 and 3 together.** The pointer/JSON core-module interface was removed rather than hardened
   first. Every world shares one sandbox (`crates/policy/src/plugin/mod.rs`): components for the
   worlds in `crates/policy/wit/policy.wit` are bound with `bindgen!`, pre-linked into an
-  `InstancePre`, and each call runs in a fresh `Store` with fuel and a `StoreLimits` memory cap
-  (`trap_on_grow_failure`, so a memory bomb traps instead of carrying on). The linker defines only
+  `InstancePre`, and each call runs in a fresh `Store` with fuel and a memory budget. The budget
+  is a custom `ResourceLimiter`, not `StoreLimits`, which caps each memory separately and leaves
+  tables unbounded: it is shared by every memory the component creates, table elements have their
+  own budget, instance, memory and table counts are capped, and growth past any of these traps. The linker defines only
   the types-only `types` interface, so a component that imports anything else, or targets another
   world, fails to load. `crates/policy/tests/plugin.rs` and `tests/worlds.rs` cover an infinite loop,
   memory growth past the cap, oversized initial memory, traps, an impure import, a core module and
