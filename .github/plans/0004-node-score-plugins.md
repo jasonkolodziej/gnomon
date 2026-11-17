@@ -48,8 +48,9 @@ world node-score {
 1. The inner policy places the job (start, planned span, nodes). Deferred jobs are left alone.
 2. The candidates are the inner policy's nodes, plus other schedulable nodes that can hold the job
    for its **walltime** from that same start. Walltime is the conservative span, so every candidate
-   is valid whatever span the estimator planned. `free-*` is capacity minus the peak use of other jobs
-   over that span (`Planner::peak_usage`).
+   is valid whatever span the estimator planned. `free-*` is the least free capacity at any instant of
+   that span, counting both other jobs' use and the node's capacity profile (`Planner::min_free`, one
+   sorted sweep).
 3. If there are no more candidates than nodes needed, there is nothing to choose and the plugin is
    not called. Otherwise one call scores all of them. The job takes the highest-scoring nodes. Ties
    go to the inner policy's choice, then to vertex order, so a constant scorer changes nothing.

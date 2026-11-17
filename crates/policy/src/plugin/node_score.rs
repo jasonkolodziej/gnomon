@@ -22,8 +22,9 @@ use std::sync::Arc;
 pub struct Candidate {
     pub name: String,
     pub capacity: gnomon_core::Resources,
-    /// Free for the placement's whole span (capacity minus the peak use of
-    /// other jobs during it).
+    /// Free for the placement's whole span: the lowest, at any instant of
+    /// it, of the capacity in force (capacity profile included) minus other
+    /// jobs' use.
     pub free: gnomon_core::Resources,
 }
 
@@ -130,11 +131,10 @@ impl ScoredPolicy {
         ids.into_iter()
             .map(|id| {
                 let v = graph.vertex(id);
-                let used = v.planner.peak_usage(start, start + span);
                 let c = Candidate {
                     name: v.name.clone(),
                     capacity: v.capacity,
-                    free: v.capacity.saturating_sub(&used),
+                    free: v.min_free(start, start.saturating_add(span)),
                 };
                 (id, c)
             })
