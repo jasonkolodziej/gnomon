@@ -1,13 +1,20 @@
 [package]
-name = "gnomon-priority-plugin-example"
+name = "gnomon-policy-plugins-example"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 publish = false
-description = "Example Gnomon priority plugin (WIT world gnomon:policy/priority)"
+description = "Example Gnomon policy plugins, one WIT world per feature (gnomon:policy)"
 
 [lib]
 crate-type = ["cdylib"]
+
+# Build exactly one per component: a component implements one world.
+[features]
+priority = []
+admission = []
+estimator = []
+node-score = []
 
 [dependencies]
 wit-bindgen = "0.43"

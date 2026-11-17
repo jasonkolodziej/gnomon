@@ -167,5 +167,5 @@ testkit/out/
 .claude/worktrees/
 
 # Example WASM priority plugin build output
-/examples/priority-plugin/target/
-/examples/priority-plugin/*.wasm
+/examples/policy-plugins/target/
+/examples/policy-plugins/*.wasm

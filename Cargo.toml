@@ -15,7 +15,7 @@ members = [
     "crates/sim",
 ]
 # Built for wasm32 on its own (see its README), not with the workspace.
-exclude = ["examples/priority-plugin"]
+exclude = ["examples/policy-plugins"]
 
 [workspace.package]
 version = "0.1.0"

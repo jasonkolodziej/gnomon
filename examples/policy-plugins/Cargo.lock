@@ -115,7 +115,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gnomon-priority-plugin-example"
+name = "gnomon-policy-plugins-example"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",

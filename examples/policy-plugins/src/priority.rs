@@ -1,21 +1,11 @@
-//! Example Gnomon priority plugin (ADR 0002).
-//!
-//! Multifactor priority in the style of Slurm's `priority/multifactor`:
+//! Priority plugin (ADR 0002): a multifactor priority in the style of
+//! Slurm's `priority/multifactor`:
 //!
 //! * **age**: 10 points per minute waited, capped at 7 days, so old jobs
 //!   cannot starve;
 //! * **size**: small jobs first, up to 10 000 points for a single core,
 //!   falling with the total core count (every node of a gang);
 //! * **partition**: `debug` jobs get a flat 50 000 boost.
-//!
-//! The plugin is a pure function of its arguments: it imports nothing (no
-//! WASI, no clock: `now` is passed in) and uses only integer arithmetic, so
-//! every replica and the offline simulator compute the same value.
-//!
-//! Build: see `README.md` next to this file.
-
-// The generated canonical-ABI export takes the flattened job (12 arguments).
-#![allow(clippy::too_many_arguments)]
 
 wit_bindgen::generate!({
     path: "../../crates/policy/wit",

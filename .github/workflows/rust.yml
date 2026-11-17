@@ -84,7 +84,7 @@ jobs:
         run: cargo test --workspace --locked
 
   wasm-plugin:
-    name: Example WASM plugin
+    name: Example WASM plugins
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -105,31 +105,37 @@ jobs:
         with:
           workspaces: |
             . -> target
-            examples/priority-plugin -> target
+            examples/policy-plugins -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # wasm32-unknown-unknown links no WASI, so the component imports
-      # nothing but the WIT types (ADR 0002, Rule 2).
-      - name: Build the plugin component
-        working-directory: examples/priority-plugin
+      # One component per world. wasm32-unknown-unknown links no WASI, so a
+      # component imports nothing but the WIT types (ADR 0002, Rule 2).
+      - name: Build the plugin components
+        working-directory: examples/policy-plugins
         run: |
-          cargo build --release --locked --target wasm32-unknown-unknown
-          wasm-tools component new \
-            target/wasm32-unknown-unknown/release/gnomon_priority_plugin_example.wasm \
-            -o priority.wasm
-          wasm-tools validate priority.wasm
-          wasm-tools component wit priority.wasm
+          for world in priority admission estimator node-score; do
+            cargo build --release --locked --target wasm32-unknown-unknown \
+              --no-default-features --features "$world"
+            wasm-tools component new \
+              target/wasm32-unknown-unknown/release/gnomon_policy_plugins_example.wasm \
+              -o "$world.wasm"
+            wasm-tools validate "$world.wasm"
+            wasm-tools component wit "$world.wasm"
+          done
 
-      - name: Load and run it in the host
+      - name: Load and run them in the host
         env:
-          GNOMON_EXAMPLE_PLUGIN: ${{ github.workspace }}/examples/priority-plugin/priority.wasm
-        run: cargo test -p gnomon-policy --test example_plugin --locked -- --nocapture
+          GNOMON_EXAMPLE_PRIORITY_PLUGIN: ${{ github.workspace }}/examples/policy-plugins/priority.wasm
+          GNOMON_EXAMPLE_ADMISSION_PLUGIN: ${{ github.workspace }}/examples/policy-plugins/admission.wasm
+          GNOMON_EXAMPLE_ESTIMATOR_PLUGIN: ${{ github.workspace }}/examples/policy-plugins/estimator.wasm
+          GNOMON_EXAMPLE_NODE_SCORE_PLUGIN: ${{ github.workspace }}/examples/policy-plugins/node-score.wasm
+        run: cargo test -p gnomon-policy --test example_plugins --locked -- --nocapture
 
-      - name: Upload the plugin
+      - name: Upload the plugins
         uses: actions/upload-artifact@v4
         with:
-          name: priority-plugin-example
-          path: examples/priority-plugin/priority.wasm
+          name: policy-plugins-example
+          path: examples/policy-plugins/*.wasm
 
   macos:
     name: macOS build
@@ -209,7 +215,7 @@ jobs:
         shell: bash # -o pipefail, so the floor still fails the step through tee
         run: >
           cargo llvm-cov --workspace --locked
-          --ignore-filename-regex 'src/bin/(bench|occ_bench|experiments)\.rs$'
+          --ignore-filename-regex 'src/bin/(bench|occ_bench|experiments|plugin_bench)\.rs$'
           --fail-under-lines 80
           --summary-only | tee coverage.txt
 
