@@ -42,7 +42,7 @@ proposed in [`docs/SLURM_Scheduler_Research_and_Rust_Design.md`](docs/SLURM_Sche
 | `gnomon-graph` | Resource graph, per-vertex Planners (O(S log S) sweep), **per-vertex versions**, **time-varying capacity profiles**, **ownership-typed subgraph grants** | 4.2, 4.4 |
 | `gnomon-fsm` | Replicated state machine, snapshots, injected clock, **event journal**, node registry, work assignments, **kill list** (gang peers, running-job cancel), **`Proposer` hook** routing writes through Raft | 4.1 |
 | `gnomon-sched` | Coalescing eval broker, parallel workers, **per-vertex optimistic plan applier**, `backfill_pass`, **runtime-quantile estimator**, **bias-corrected estimator** with the **wide-job shield** (`WideSafeBackfill`), **shadow mode** | 4.3 |
-| `gnomon-policy` | **Policy-as-data** (fairshare/QoS/limits JSON) + **wasmtime-sandboxed priority plugins** | 4.5 |
+| `gnomon-policy` | **Policy-as-data** (fairshare/QoS/limits JSON) + **wasmtime-sandboxed plugins** for admission, priority, runtime estimation and node scoring | 4.5 |
 | `gnomon-consensus` | **openraft** storage bridging Raft to the FSM: in-memory `Store` and **durable `DiskStore`** (fsync'd checksummed log, atomic vote/snapshot, crash recovery); **TCP Raft transport** and **replicated controller** (`replica`): writes committed through the log, forwarded from followers; durable event journal for the single controller | 4.1 |
 | `gnomon-api` | **tonic gRPC** service: lock-free snapshot reads, index-aware blocking queries; writes that cannot be committed are `UNAVAILABLE`; kill list delivered with `FetchWork` | 4.3 |
 | `gnomon-ctl` | Controller daemon (gRPC server + background scheduler loop); `--state-dir` / `GNOMON_STATE_DIR` makes it restart-safe; `--raft-id`/`--raft-peers` makes it one replica of a fault-tolerant group | 4.6 |
@@ -332,7 +332,8 @@ ratatui's `TestBackend` with no network.
 3. [x] gRPC API tier + Slurm-compatible CLI shims
 4. [x] Agent registration/heartbeat/exec over the wire, cgroup v2 confinement, rootless containers;
        CDI injection next
-5. [x] Policy-as-data + WASM-sandboxed priority plugins; fairshare accounting history next
+5. [x] Policy-as-data + WASM-sandboxed admission, priority, estimator and node-score plugins;
+       fairshare accounting history next
 6. [x] Nested instances: ownership-typed `SubgraphGrant` (compile-time delegation safety);
        cross-process child instances next
 7. [x] Per-vertex OCC, exact replay/shadow mode, distribution-aware planning (opt-in),

@@ -1,6 +1,7 @@
 # 0002 — Sandboxed WASM plugins for scheduling policy
 
-**Status**: Proposed
+**Status**: Accepted (implemented, see [Implementation](#implementation); step 5 continues in
+[0003](./0003-admission-plugins.md) and [0004](./0004-node-score-plugins.md))
 **Date**: 2026-11-17
 
 ## Context
@@ -75,7 +76,7 @@ gives the same output on x86_64 and aarch64, which `gnomon-sim` relies on to eva
 offline.
 
 **Rule 3: bounded cost, safe fallback.** Every call has a fuel budget (`Config::consume_fuel`) and a
-`StoreLimits` memory cap, both configurable. Out of fuel, out of memory, a trap or a load error falls
+memory cap, both configurable. Out of fuel, out of memory, a trap or a load error falls
 back to the declarative `PolicyConfig` result and is logged and counted. A plugin can make decisions
 worse; it cannot stop scheduling.
 
@@ -141,8 +142,62 @@ controller plugins. It gets its own ADR.
   surface: breaking changes need a new major version, and the host should support at least the
   previous one.
 - **Operations**: plugin path, fuel budget and memory cap become controller configuration, and belong
-  in `docs/INSTALL.md` once step 2 lands. Every replica must load the same plugin for consistent
-  priorities after a failover. The leader computes the value, but a different plugin on the new
-  leader changes later decisions.
+  in `docs/INSTALL.md` once step 2 lands. Every replica must load the same plugin: the submit handler
+  runs on whichever replica receives the request (followers forward only the finished event), so
+  different plugins give different priorities depending on which replica a client reached.
 - **Follow-ups**: separate ADRs for `admission` (if it can rewrite jobs) and for WASM job execution
   on the agent.
+
+## Implementation
+
+All five steps are implemented. Where the code differs from the text above:
+
+- **Steps 1 and 3 together.** The pointer/JSON core-module interface was removed rather than hardened
+  first. Every world shares one sandbox (`crates/policy/src/plugin/mod.rs`): components for the
+  worlds in `crates/policy/wit/policy.wit` are bound with `bindgen!`, pre-linked into an
+  `InstancePre`, and each call runs in a fresh `Store` with fuel and a memory budget. The budget
+  is a custom `ResourceLimiter`, not `StoreLimits`, which caps each memory separately and leaves
+  tables unbounded: it is shared by every memory the component creates, table elements have their
+  own budget, instance, memory and table counts are capped, and growth past any of these traps. The linker defines only
+  the types-only `types` interface, so a component that imports anything else, or targets another
+  world, fails to load. `crates/policy/tests/plugin.rs` and `tests/worlds.rs` cover an infinite loop,
+  memory growth past the cap, oversized initial memory, traps, an impure import, a core module and
+  invalid return values. They use hand-written component WAT (`gnomon_policy::fixtures`), so the
+  tests need no WASM toolchain.
+- **Fallbacks and counters.** Each world's hook counts calls and failures (`AtomicU64`s). The
+  controller has no metrics endpoint yet, so failures are logged with the running count rather than
+  exported as a gauge.
+- **Wiring keeps wasmtime out of the API client.** `gnomon-api` defines a `SubmitPolicy` trait (first
+  `SubmitPriority`, generalized for admission by ADR 0003) and `SchedulerSvc::submit_policy`.
+  `gnomon-ctl` implements it (`crates/ctl/src/plugins.rs`), so `gnomon-agent`, `gnomon-cli` and
+  `gnomon-top` do not link wasmtime. The prepared job is recorded in `JobSubmitted` after its id is
+  chosen. Without a submit-side flag the client's priority is kept and every job is accepted, as
+  before. A plugin or config that does not load stops startup. The flags are in `docs/INSTALL.md`.
+- **Example plugins.** `examples/policy-plugins` (outside the workspace) has one cargo feature per
+  world. The `Rust` workflow's `wasm-plugin` job builds each for `wasm32-unknown-unknown` (which
+  links no WASI) and wraps it with `wasm-tools component new`. `crates/policy/tests/example_plugins.rs`
+  then loads all four in the host.
+- **Offline evaluation and shadowing.** `ShadowPolicy` compares *placements* for the same job, which
+  a priority function does not change: it changes queue *order*. Step 4 is therefore:
+  - `experiments` E4 (`--admission-plugin`, `--priority-plugin`, `--estimator-plugin`): each SWF
+    window is scheduled as-is and with the candidate plugins applied as the controller would
+    (`gnomon_sim::submit::{admit, assign}`). It reports rejected and rewritten jobs, schedule metrics,
+    and `fcfs_agreement`, the fraction of job pairs left in submit order.
+  - `ShadowPriority` and `gnomon-ctl --shadow-priority-plugin`: a candidate priority plugin runs on
+    live submissions beside the deployed one. Disagreements are counted and logged, and nothing is
+    applied.
+- **Step 5, further worlds**, all in package `gnomon:policy@0.1.0`. The new types (`request`,
+  `verdict`, `node`) were added to the existing `types` interface. Nothing had been released, and a
+  priority component still loads unchanged.
+  - `admission`: [ADR 0003](./0003-admission-plugins.md) (it rewrites jobs).
+  - `estimator`: `estimate(job) -> option<u64>`, used through `WasmEstimator`, a
+    `gnomon_sched::RuntimeEstimator`. It needs no ADR of its own: it runs on the leader while plans
+    are built, and the plan event records the resulting span, which is Rule 1. The function takes no
+    `now`, so the estimate is a pure function of the job and is cached for as long as the job is
+    queued. `none` or a failure plans with the walltime, and estimates are clamped to
+    `[1, walltime]`. The walltime stays the kill limit. Being pure, the estimator cannot learn from
+    completions the way `QuantileEstimator` does; a trained model has to be compiled in.
+  - `node-score`: [ADR 0004](./0004-node-score-plugins.md). It is one batched call per placement,
+    not one per node, and only chooses among nodes feasible at the start the scheduler already
+    chose. `plugin_bench` (`gnomon-policy`, run by the Benchmarks workflow) measures it, rather than
+    `occ_bench`: `gnomon-sched` cannot depend on `gnomon-policy`.

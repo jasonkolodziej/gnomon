@@ -330,6 +330,10 @@ with reservations), serves the gRPC API and, optionally, replicates through Raft
 
 ```text
 gnomon-ctl [--listen ADDR] [--state-dir DIR] [--raft-id N --raft-peers ID=HOST:PORT,...]
+           [--admission-plugin FILE.wasm [--admission-fail open|closed]]
+           [--priority-plugin FILE.wasm] [--policy-config FILE.json] [--shadow-priority-plugin FILE.wasm]
+           [--estimator-plugin FILE.wasm] [--node-score-plugin FILE.wasm [--node-score-candidates N|all]]
+           [--plugin-fuel N] [--plugin-memory-mb N]
 gnomon-ctl --demo        # in-process demo: submits a few jobs and prints the plan, then exits
 ```
 
@@ -341,6 +345,16 @@ gnomon-ctl --demo        # in-process demo: submits a few jobs and prints the pl
 | `--raft-peers LIST` | `GNOMON_RAFT_PEERS` | none | `1=ctl1:7700,2=ctl2:7700,...`; this replica's entry is also its Raft listen address |
 | | `GNOMON_HEARTBEAT_SECS` | `10` | interval agents heartbeat and poll for work (sent at registration; agents use at least 2) |
 | | `GNOMON_NODE_TIMEOUT_SECS` | 3 × heartbeat, at least `30` | seconds without a heartbeat after which the leader declares a node lost and fails its jobs |
+| `--admission-plugin FILE` | `GNOMON_ADMISSION_PLUGIN` | none | accepts, rejects or rewrites each submission; see [Policy plugins](#policy-plugins) |
+| `--admission-fail MODE` | `GNOMON_ADMISSION_FAIL` | `open` | when the admission plugin fails: `open` accepts the job unchanged, `closed` rejects it |
+| `--priority-plugin FILE` | `GNOMON_PRIORITY_PLUGIN` | none | computes each submission's priority |
+| `--policy-config FILE` | `GNOMON_POLICY_CONFIG` | built-in defaults | declarative policy JSON (`PolicyConfig`): the priority when there is no plugin, and the fallback when the plugin fails |
+| `--shadow-priority-plugin FILE` | `GNOMON_SHADOW_PRIORITY_PLUGIN` | none | candidate priority plugin run beside the live priority and logged, never applied |
+| `--estimator-plugin FILE` | `GNOMON_ESTIMATOR_PLUGIN` | none | predicts runtimes for backfill planning (walltime when it declines or fails) |
+| `--node-score-plugin FILE` | `GNOMON_NODE_SCORE_PLUGIN` | none | chooses among the nodes a job could use at its planned start |
+| `--node-score-candidates N` | `GNOMON_NODE_SCORE_CANDIDATES` | `64` | most nodes offered per node-score call besides the default choice, or `all` |
+| `--plugin-fuel N` | `GNOMON_PLUGIN_FUEL` | `10000000` | instruction budget per plugin call |
+| `--plugin-memory-mb N` | `GNOMON_PLUGIN_MEMORY_MB` | `16` | linear-memory cap per plugin call, summed over all of the plugin's memories |
 
 Flags win over environment variables. A flag given without a value is an error rather than a silent
 fallback (a typo must not quietly disable durability). The controller logs to stdout/stderr.
@@ -349,6 +363,44 @@ fallback (a typo must not quietly disable durability). The controller logs to st
 gnomon-ctl                                   # in-memory, for experiments
 gnomon-ctl --state-dir /var/lib/gnomon       # durable single controller
 ```
+
+### Policy plugins
+
+Sites can replace four policy decisions with WebAssembly plugins, the sandboxed equivalent of Slurm's
+`job_submit.lua` and C plugins ([ADR 0002](../.github/plans/0002-wasm-policy-plugins.md),
+[0003](../.github/plans/0003-admission-plugins.md), [0004](../.github/plans/0004-node-score-plugins.md)).
+Each plugin is a component for one world in
+[`crates/policy/wit/policy.wit`](../crates/policy/wit/policy.wit), and
+[`examples/policy-plugins`](../examples/policy-plugins) has a Rust example of each, with build steps.
+
+| World | Runs | Decides | When it fails |
+|---|---|---|---|
+| `admission` | at submit | accept, reject (the user sees the reason) or rewrite the request | accept unchanged (`--admission-fail open`) or reject (`closed`) |
+| `priority` | at submit, after admission | the job's priority | the declarative priority from `--policy-config` |
+| `estimator` | on the leader, once per queued job | the runtime backfill plans for | the walltime |
+| `node-score` | on the leader, per placement with a choice | which feasible nodes the job gets (never when it starts) | the default placement |
+
+- **Results are recorded, not recomputed.** Submit-time plugins run before the `JobSubmitted` event
+  is built, and planning plugins before the plan event. Replicas and recovery apply the recorded
+  result and never run a plugin.
+- **Plugins are pure.** A plugin may import nothing (no WASI, no clock: the current time is a
+  parameter), so it can only compute from its arguments. A component that imports anything, or
+  implements a different world, is refused when it loads.
+- **Every call is bounded** by `--plugin-fuel` and `--plugin-memory-mb`. Running out of either,
+  trapping or returning an invalid value (a rewrite to zero nodes, say) gives the fallback above,
+  and the controller logs it with a running failure count. A plugin or config file that does not
+  load stops the controller at startup.
+- By default a job keeps the priority its client submitted (`gnbatch` sends 1000). With
+  `--priority-plugin` or `--policy-config` the controller computes it instead.
+- **Give every replica the same plugins and config.** The submit-side plugins run on whichever
+  replica handles a submission, so replicas with different plugins treat jobs differently depending
+  on which one a client reached. The planning plugins run on the leader, so a failover to a replica
+  with different plugins changes later plans.
+- **Try a candidate before deploying it.** Offline, `experiments <swf-dir> <out> 5000 --only e4
+  --admission-plugin a.wasm --priority-plugin p.wasm --estimator-plugin e.wasm` schedules SWF trace
+  windows with and without the plugins and writes `e4_plugins.csv`. Live,
+  `--shadow-priority-plugin` runs a candidate priority beside the deployed one and logs how often it
+  disagrees. `plugin_bench` (in `gnomon-policy`) measures what plugins cost a scheduling pass.
 
 ### gnomon-agent
 

@@ -22,6 +22,8 @@
 //! on its first backfill pass. Agents and CLIs may list every controller in
 //! `GNOMON_ADDR` and fail over between them.
 
+mod plugins;
+
 use gnomon_consensus::replica::{self, Peers};
 use gnomon_core::{Clock, Event, Job, Resources, SystemClock, Walltime};
 use gnomon_fsm::Fsm;
@@ -274,6 +276,10 @@ async fn main() {
         .unwrap_or_else(|| "0.0.0.0:7631".into()); // neighbors Slurm's 6817
     let raft = raft_config(args, env("GNOMON_RAFT_ID"), env("GNOMON_RAFT_PEERS"))
         .unwrap_or_else(|e| fail(e));
+    let plugins = plugins::load(args, env).unwrap_or_else(|e| fail(e));
+    for line in &plugins.summary {
+        println!("gnomon-ctl: {line}");
+    }
     let broker = Arc::new(EvalBroker::new());
     let (fsm, role, _replica) = match raft {
         Some((id, peers)) => {
@@ -325,7 +331,7 @@ async fn main() {
     };
     let role = Arc::new(role);
     let applier = Arc::new(PlanApplier::new());
-    let policy: Arc<dyn Policy> = Arc::new(BackfillPolicy::new(48 * 3600));
+    let policy = plugins.policy.clone();
 
     // Background scheduler loop: dequeue evals, plan on snapshots, commit.
     // Replicated, only the leader plans; evals reaching a follower are
@@ -352,6 +358,9 @@ async fn main() {
                 leading = now_leading;
                 match broker.dequeue() {
                     Some(eval) if leading => {
+                        // Extend overruns first: the FSM refuses a start on
+                        // resources an overrunning job still holds.
+                        gnomon_sched::extend_overruns(&fsm, policy.as_ref(), fsm.now());
                         let snap = fsm.snapshot();
                         if let Some(job) = snap.job(eval.job) {
                             if job.state == gnomon_core::JobState::Pending {
@@ -419,7 +428,14 @@ async fn main() {
         .unwrap_or_else(|e| fail(format!("--listen '{listen}': {e}")));
     println!("gnomon-ctl listening on {addr}");
     tonic::transport::Server::builder()
-        .add_service(SchedulerSvc { fsm, broker }.server())
+        .add_service(
+            SchedulerSvc {
+                fsm,
+                broker,
+                submit_policy: plugins.submit,
+            }
+            .server(),
+        )
         .serve(addr)
         .await
         .expect("gRPC server");

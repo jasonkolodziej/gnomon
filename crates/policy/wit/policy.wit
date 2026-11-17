@@ -1,0 +1,83 @@
+/// Gnomon scheduling-policy plugins (ADR 0002, 0003, 0004).
+///
+/// Plugins are pure functions: the worlds import nothing (no WASI, no host
+/// functions), so a plugin sees only its arguments. Time is passed in as
+/// `now` (Unix seconds); the plugin must not need a clock.
+package gnomon:policy@0.1.0;
+
+interface types {
+  /// The job as submitted. `cores`, `mem-mb` and `gpus` are per node;
+  /// `nodes` is the gang size (at least 1).
+  record job {
+    id: u64,
+    user: string,
+    partition: string,
+    cores: u32,
+    mem-mb: u64,
+    gpus: u32,
+    nodes: u32,
+    walltime-secs: u64,
+    submit-time: u64,
+  }
+
+  /// The part of a job admission may rewrite. Identity (id, user, submit
+  /// time) is not rewritable. `nodes` and `walltime-secs` must be at least
+  /// 1, and `cores`, `mem-mb` and `gpus` not all 0.
+  record request {
+    partition: string,
+    cores: u32,
+    mem-mb: u64,
+    gpus: u32,
+    nodes: u32,
+    walltime-secs: u64,
+  }
+
+  /// Admission decision (ADR 0003).
+  variant verdict {
+    accept,
+    /// Refuse the job; the reason is returned to the submitter.
+    reject(string),
+    /// Accept it with this request instead of the submitted one.
+    rewrite(request),
+  }
+
+  /// A candidate node for placement (ADR 0004): capacity, and what is free
+  /// on it for the placement's whole span starting at the planned start.
+  record node {
+    name: string,
+    cores: u32,
+    mem-mb: u64,
+    gpus: u32,
+    free-cores: u32,
+    free-mem-mb: u64,
+    free-gpus: u32,
+  }
+}
+
+/// Priority plugin: a higher value is scheduled earlier.
+world priority {
+  use types.{job};
+  export priority: func(job: job, now: u64) -> u64;
+}
+
+/// Admission plugin, the equivalent of Slurm's `job_submit` (ADR 0003).
+world admission {
+  use types.{job, verdict};
+  export admit: func(job: job, now: u64) -> verdict;
+}
+
+/// Runtime estimator: the expected runtime in seconds, or `none` to plan
+/// with the walltime. The host clamps it to `[1, walltime]`. No `now`: the
+/// estimate depends on the job alone, so the host computes it once per job.
+world estimator {
+  use types.{job};
+  export estimate: func(job: job) -> option<u64>;
+}
+
+/// Node scoring (ADR 0004): one score per candidate, in order; the job goes
+/// to the highest-scoring nodes. Called once per placement with every node
+/// that can hold the job at the start the scheduler chose.
+world node-score {
+  use types.{job, node};
+  export score: func(job: job, candidates: list<node>, now: u64) -> list<s64>;
+}

@@ -12,11 +12,14 @@
 //!   under a different policy: a counterfactual, using the real code.
 //! * `ShadowPolicy` (in `gnomon-sched`) — run a candidate next to the live
 //!   policy and record disagreements without acting on them.
+//! * [`submit`] — apply candidate submit-time admission and priorities (WASM
+//!   plugins, say) to a workload and measure how they reorder the queue.
 //!
 //! Workloads can also come from Standard Workload Format traces ([`swf`]).
 
 pub mod metrics;
 pub mod replay;
+pub mod submit;
 pub mod swf;
 
 use gnomon_core::{Clock, Event, Job, JobId, JobState, ManualClock, Resources};

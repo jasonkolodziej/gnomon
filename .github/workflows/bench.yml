@@ -80,13 +80,16 @@ jobs:
           save-if: false
 
       - name: Build benchmarks
-        run: cargo build --release --locked -p gnomon-sched --bins
+        run: cargo build --release --locked -p gnomon-sched -p gnomon-policy --bins
 
       - name: Planning-core benchmark (serial vs parallel)
         run: target/release/bench | tee bench_results.csv
 
       - name: Controller-path concurrency benchmark (OCC)
         run: target/release/occ_bench | tee occ_conflicts.csv
+
+      - name: WASM plugin cost on the scheduling pass (ADR 0004)
+        run: target/release/plugin_bench | tee plugin_bench.csv
 
       - name: Publish results
         run: |
@@ -98,6 +101,7 @@ jobs:
           {
             echo "## Planning-core benchmark (\`bench\`)"; echo; table bench_results.csv; echo
             echo "## Controller-path concurrency (\`occ_bench\`)"; echo; table occ_conflicts.csv; echo
+            echo "## WASM plugin cost (\`plugin_bench\`)"; echo; table plugin_bench.csv; echo
             echo "_Shared runner, $(nproc) vCPUs: compare runs relative to each other, not absolutely._"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -108,6 +112,7 @@ jobs:
           path: |
             bench_results.csv
             occ_conflicts.csv
+            plugin_bench.csv
 
   throughput-ab:
     name: Controller throughput vs base

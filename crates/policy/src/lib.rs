@@ -2,9 +2,20 @@
 //!
 //! Scheduling policy is configuration, not code: fairshare weights, QoS
 //! tiers, per-user/partition limits are declarative JSON evaluated by pure
-//! functions. Priority computation can optionally be delegated to a
-//! WASM-sandboxed plugin (wasmtime) — untrusted policy code gets no host
-//! memory access, replacing Slurm's in-process C plugin hazards.
+//! functions. Four decisions can be delegated to WASM-sandboxed plugins
+//! ([`plugin`], ADR 0002–0004): priority, admission (Slurm's `job_submit`),
+//! runtime estimation and node scoring. Plugins are pure, fuel- and
+//! memory-bounded wasmtime components that fall back to declarative
+//! behaviour when they fail, replacing Slurm's in-process C plugin hazards.
+
+pub mod fixtures;
+pub mod plugin;
+
+pub use plugin::admission::{AdmissionHook, AdmissionPlugin, FailMode, Rewrite, Verdict};
+pub use plugin::estimator::{EstimatorPlugin, WasmEstimator};
+pub use plugin::node_score::{Candidate, NodeScorePlugin, ScoredPolicy, DEFAULT_MAX_CANDIDATES};
+pub use plugin::priority::{PriorityHook, PriorityPlugin, ShadowOutcome, ShadowPriority};
+pub use plugin::{PluginError, PluginLimits};
 
 use gnomon_core::{Job, Resources};
 use serde::{Deserialize, Serialize};
@@ -104,36 +115,6 @@ impl PolicyConfig {
     }
 }
 
-/// WASM-sandboxed priority plugin host (phase 5 differentiator).
-/// Plugin ABI: exports `memory` and `priority(job_ptr, job_len) -> u64`;
-/// the job is passed as serialized JSON in linear memory.
-pub struct WasmPriorityPlugin {
-    engine: wasmtime::Engine,
-    module: wasmtime::Module,
-}
-
-impl WasmPriorityPlugin {
-    pub fn from_wat(wat: &str) -> anyhow::Result<Self> {
-        let engine = wasmtime::Engine::default();
-        let module = wasmtime::Module::new(&engine, wat)?;
-        Ok(Self { engine, module })
-    }
-
-    pub fn priority(&self, job_json: &str) -> anyhow::Result<u64> {
-        let mut store = wasmtime::Store::new(&self.engine, ());
-        let instance = wasmtime::Instance::new(&mut store, &self.module, &[])?;
-        let memory = instance
-            .get_memory(&mut store, "memory")
-            .ok_or_else(|| anyhow::anyhow!("plugin must export memory"))?;
-        let alloc = instance.get_typed_func::<u32, u32>(&mut store, "alloc")?;
-        let prio = instance.get_typed_func::<(u32, u32), u64>(&mut store, "priority")?;
-        let ptr = alloc.call(&mut store, job_json.len() as u32)?;
-        memory.write(&mut store, ptr as usize, job_json.as_bytes())?;
-        let v = prio.call(&mut store, (ptr, job_json.len() as u32))?;
-        Ok(v)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,19 +177,5 @@ mod tests {
         };
         assert!(cfg.admits(&j, 0, &used(256)));
         assert!(!cfg.admits(&j, 0, &used(257)));
-    }
-
-    #[test]
-    fn wasm_priority_plugin_runs_sandboxed() {
-        // WAT plugin: priority = job JSON byte length (trivial but proves the
-        // sandbox round-trip: alloc -> write -> call -> read result).
-        let wat = r#"(module
-            (memory (export "memory") 1)
-            (func (export "alloc") (param i32) (result i32) (i32.const 0))
-            (func (export "priority") (param i32 i32) (result i64)
-                (i64.extend_i32_u (local.get 1))))"#;
-        let plugin = WasmPriorityPlugin::from_wat(wat).unwrap();
-        let prio = plugin.priority("{\"cores\":8}").unwrap();
-        assert_eq!(prio, "{\"cores\":8}".len() as u64);
     }
 }

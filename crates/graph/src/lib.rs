@@ -99,6 +99,22 @@ fn sub(a: Resources, b: Resources) -> Resources {
     a.saturating_sub(&b)
 }
 
+fn max_each(a: Resources, b: Resources) -> Resources {
+    Resources {
+        cores: a.cores.max(b.cores),
+        mem_mb: a.mem_mb.max(b.mem_mb),
+        gpus: a.gpus.max(b.gpus),
+    }
+}
+
+fn min_each(a: Resources, b: Resources) -> Resources {
+    Resources {
+        cores: a.cores.min(b.cores),
+        mem_mb: a.mem_mb.min(b.mem_mb),
+        gpus: a.gpus.min(b.gpus),
+    }
+}
+
 impl Planner {
     /// Earliest `start >= from` such that `req` fits against `cap`
     /// continuously for `dur` seconds.
@@ -170,6 +186,66 @@ impl Planner {
             .iter()
             .filter(|s| s.start <= t && t < s.end)
             .fold(Resources::default(), |u, s| u.add(&s.res))
+    }
+
+    /// Largest use of each resource at any instant of `[from, to)` (per
+    /// resource, so the maxima may come from different instants).
+    pub fn peak_usage(&self, from: u64, to: u64) -> Resources {
+        let mut peak = Resources::default();
+        self.sweep(from, to, &[], |_, u| peak = max_each(peak, u));
+        peak
+    }
+
+    /// Smallest free amount of each resource at any instant of `[from, to)`:
+    /// the capacity in force at that instant (profile included) minus usage.
+    pub fn min_free(&self, cap: CapView, from: u64, to: u64) -> Resources {
+        let mut steps = Vec::new();
+        if let Some(p) = cap.profile {
+            p.breakpoints(from, to, &mut steps);
+        }
+        let mut free: Option<Resources> = None;
+        self.sweep(from, to, &steps, |t, u| {
+            let f = sub(cap.at(t), u);
+            free = Some(free.map_or(f, |m| min_each(m, f)));
+        });
+        free.unwrap_or_default()
+    }
+
+    /// Walk the usage step function over `[from, to)` in one sorted pass,
+    /// calling `f(t, usage)` at `from` and at each later instant where a span
+    /// starts or ends or that `extra` names, after every change at `t`.
+    fn sweep(&self, from: u64, to: u64, extra: &[u64], mut f: impl FnMut(u64, Resources)) {
+        let mut usage = Resources::default();
+        let mut deltas: Vec<(u64, bool, Resources)> = Vec::new();
+        for s in self.spans.iter().filter(|s| s.end > from && s.start < to) {
+            if s.start <= from {
+                usage = usage.add(&s.res);
+            } else {
+                deltas.push((s.start, true, s.res));
+            }
+            if s.end < to {
+                deltas.push((s.end, false, s.res));
+            }
+        }
+        deltas.sort_unstable_by_key(|d| d.0);
+        let mut points: Vec<u64> = deltas.iter().map(|d| d.0).collect();
+        points.extend(extra.iter().copied().filter(|&t| from < t && t < to));
+        points.push(from);
+        points.sort_unstable();
+        points.dedup();
+        let mut di = 0;
+        for p in points {
+            while di < deltas.len() && deltas[di].0 <= p {
+                let (_, is_start, r) = deltas[di];
+                usage = if is_start {
+                    usage.add(&r)
+                } else {
+                    sub(usage, r)
+                };
+                di += 1;
+            }
+            f(p, usage);
+        }
     }
 
     /// Reserve `[start, start+dur)` consuming `req`. Returns false on conflict
@@ -316,6 +392,11 @@ impl Vertex {
     }
     pub fn earliest_fit(&self, req: &Resources, from: u64, dur: u64) -> Option<u64> {
         self.planner.earliest_fit(self.cap(), req, from, dur)
+    }
+    /// Free capacity guaranteed throughout `[from, to)` (see
+    /// [`Planner::min_free`]).
+    pub fn min_free(&self, from: u64, to: u64) -> Resources {
+        self.planner.min_free(self.cap(), from, to)
     }
 }
 
@@ -683,6 +764,99 @@ mod tests {
             );
         }
         g
+    }
+
+    #[test]
+    fn peak_usage_is_the_per_resource_maximum_over_the_window() {
+        let cap = CapView {
+            base: Resources {
+                cores: 8,
+                mem_mb: 100,
+                gpus: 0,
+            },
+            profile: None,
+        };
+        let r = |cores, mem_mb| Resources {
+            cores,
+            mem_mb,
+            gpus: 0,
+        };
+        let mut p = Planner::default();
+        assert!(p.reserve(cap, &r(2, 50), 0, 100)); // [0, 100)
+        assert!(p.reserve(cap, &r(4, 10), 50, 100)); // [50, 150)
+        assert_eq!(p.peak_usage(0, 50), r(2, 50));
+        assert_eq!(p.peak_usage(0, 200), r(6, 60));
+        assert_eq!(p.peak_usage(100, 200), r(4, 10));
+        assert_eq!(p.peak_usage(150, 200), r(0, 0));
+    }
+
+    #[test]
+    fn min_free_follows_the_capacity_profile() {
+        let r = |cores| Resources {
+            cores,
+            mem_mb: 100,
+            gpus: 0,
+        };
+        // 8 cores, cut to 3 for [12, 20) of every 20 s.
+        let prof = CapacityProfile {
+            period: Some(20),
+            steps: vec![(0, r(8)), (12, r(3))],
+        };
+        let cap = CapView {
+            base: r(8),
+            profile: Some(&prof),
+        };
+        let mut p = Planner::default();
+        assert!(p.reserve(cap, &r(2), 0, 10));
+        assert_eq!(p.min_free(cap, 0, 10).cores, 6);
+        assert_eq!(p.min_free(cap, 10, 12).cores, 8);
+        assert_eq!(p.min_free(cap, 0, 15).cores, 3, "the cut, not the base");
+        assert_eq!(p.min_free(cap, 30, 40).cores, 3, "and in later periods");
+    }
+
+    /// `peak_usage` and `min_free` agree with an instant-by-instant scan.
+    #[test]
+    fn usage_sweeps_match_bruteforce() {
+        let r = |cores| Resources {
+            cores,
+            mem_mb: cores as u64,
+            gpus: 0,
+        };
+        let prof = CapacityProfile {
+            period: Some(20),
+            steps: vec![(0, r(64)), (12, r(40))],
+        };
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            seed >> 33
+        };
+        for _ in 0..300 {
+            let mut p = Planner::default();
+            for _ in 0..(next() % 8) {
+                let start = next() % 60;
+                p.push_unchecked(&r(1 + (next() % 6) as u32), start, 1 + next() % 30, None);
+            }
+            let cap = CapView {
+                base: r(64),
+                profile: Some(&prof),
+            };
+            let from = next() % 70;
+            let to = from + 1 + next() % 40;
+            let usage: Vec<Resources> = (from..to).map(|t| p.usage_at(t)).collect();
+            let peak = usage
+                .iter()
+                .fold(Resources::default(), |m, &u| max_each(m, u));
+            let free = (from..to)
+                .zip(&usage)
+                .map(|(t, &u)| sub(cap.at(t), u))
+                .reduce(min_each)
+                .unwrap();
+            assert_eq!(p.peak_usage(from, to), peak);
+            assert_eq!(p.min_free(cap, from, to), free);
+        }
     }
 
     #[test]

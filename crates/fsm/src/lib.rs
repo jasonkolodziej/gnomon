@@ -406,6 +406,50 @@ impl Fsm {
     }
 }
 
+/// Whether starting `req` on `vertices` at `start` for `d` seconds leaves
+/// room for the running jobs there that have outlived their planned span.
+///
+/// With runtime estimates, a running job's booking can end while the job is
+/// still running, until the backfill pass extends it (`JobExtended`). The
+/// graph then shows its resources as free, and the per-vertex version check
+/// cannot notice, since nothing changed. A start in that window would put
+/// two jobs on resources only one fits. So the overrunning jobs count as
+/// using their request for the whole new span: the extension is at least
+/// that long, up to their walltime. Reservations need no check: they are
+/// re-planned every pass, after the extensions.
+fn clear_of_overruns(
+    st: &State,
+    vertices: &[VertexId],
+    req: &Resources,
+    start: u64,
+    d: u64,
+) -> bool {
+    let mut extra: Vec<Resources> = vec![Resources::default(); vertices.len()];
+    let mut any = false;
+    for j in st.jobs.values().filter(|j| j.state == JobState::Running) {
+        let Some(end) = j.planned_start.zip(j.planned_dur).map(|(s, d)| s + d) else {
+            continue;
+        };
+        if end > start {
+            continue; // still booked at `start`: the planner already saw it
+        }
+        let held: Vec<VertexId> = match &j.allocation {
+            Some(names) => names.iter().filter_map(|n| st.graph.by_name(n)).collect(),
+            None => j.placed_on.into_iter().collect(),
+        };
+        for (k, v) in vertices.iter().enumerate() {
+            if held.contains(v) {
+                extra[k] = extra[k].add(&j.request);
+                any = true;
+            }
+        }
+    }
+    !any || vertices
+        .iter()
+        .zip(&extra)
+        .all(|(&v, x)| st.graph.vertex(v).earliest_fit(&req.add(x), start, d) == Some(start))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn place(
     st: &mut State,
@@ -428,13 +472,16 @@ fn place(
     if nodes > 1 && vertices.len() != nodes as usize {
         return false;
     }
+    let running = !reserve_only && start <= now;
+    if running && !clear_of_overruns(st, vertices, &req, start, d) {
+        return false;
+    }
     if !st
         .graph
         .commit_job(vertices, &req, start, d, Some(job.0), expect)
     {
         return false;
     }
-    let running = !reserve_only && start <= now;
     let j = st.jobs.get_mut(&job).unwrap();
     j.state = if running {
         JobState::Running
@@ -876,6 +923,71 @@ mod tests {
         assert!(
             !fsm.apply_checked(ev).accepted,
             "a job must never be placed twice"
+        );
+    }
+
+    #[test]
+    fn a_start_never_overlaps_a_running_job_past_its_planned_span() {
+        let (clock, fsm) = setup();
+        fsm.apply(Event::JobSubmitted(job(1, 4, 1000)));
+        fsm.apply(Event::JobSubmitted(job(2, 4, 1000)));
+        // Job 1 was planned for an estimated 10 s of its 1000 s walltime.
+        assert!(
+            fsm.apply_checked(Event::JobStarted {
+                job: JobId(1),
+                vertices: vec![1],
+                start: 1000,
+                dur: Some(10),
+            })
+            .accepted
+        );
+        clock.set(1020);
+        // Its booking has ended but it still runs, unextended. The graph
+        // shows the node free, and the version is unchanged, so the plan's
+        // read set matches: only the overrun check can refuse this.
+        let version = fsm.snapshot().graph().versions(&[1]);
+        let start2 = Event::JobStarted {
+            job: JobId(2),
+            vertices: vec![1],
+            start: 1020,
+            dur: Some(10),
+        };
+        assert!(!fsm.apply_with_expect(start2.clone(), &version).accepted);
+        // Extended, the booking itself refuses it.
+        fsm.apply(Event::JobExtended {
+            job: JobId(1),
+            new_end: 1100,
+        });
+        assert!(!fsm.apply_checked(start2.clone()).accepted);
+        // Finished, the node is free again.
+        fsm.apply(Event::JobFinished {
+            job: JobId(1),
+            end: 1020,
+            code: 0,
+        });
+        assert!(fsm.apply_checked(start2).accepted);
+    }
+
+    #[test]
+    fn a_start_beside_an_overrunning_job_is_fine_when_both_fit() {
+        let (clock, fsm) = setup();
+        fsm.apply(Event::JobSubmitted(job(1, 2, 1000)));
+        fsm.apply(Event::JobSubmitted(job(2, 2, 1000)));
+        fsm.apply(Event::JobStarted {
+            job: JobId(1),
+            vertices: vec![1],
+            start: 1000,
+            dur: Some(10),
+        });
+        clock.set(1020);
+        assert!(
+            fsm.apply_checked(Event::JobStarted {
+                job: JobId(2),
+                vertices: vec![1],
+                start: 1020,
+                dur: Some(10),
+            })
+            .accepted
         );
     }
 
