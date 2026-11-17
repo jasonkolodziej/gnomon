@@ -2,7 +2,7 @@
 //! traces from the Parallel Workloads Archive (SWF).
 //!
 //! usage: `experiments <dir-with-swf-traces> <out-dir> [jobs-per-window]
-//! [--only e0|e1|e2|e3]`
+//! [--only e0|e1|e2|e3|e4] [--priority-plugin candidate.wasm]`
 //!
 //! E0  exact replay: journal -> identical state; recovered history under the
 //!     same policy -> identical start times.
@@ -12,13 +12,17 @@
 //! E2  time-varying capacity: power cap and carbon windows, planner-aware vs
 //!     planner-unaware.
 //! E3  shadow mode on live traffic.
+//! E4  candidate priority plugin (only with `--priority-plugin`): every
+//!     trace window scheduled under FCFS priorities and under the plugin's
+//!     submit-time priorities (ADR 0002, step 4).
 
 use gnomon_core::{CapacityProfile, Job, JobId, Resources};
+use gnomon_policy::{PluginLimits, PriorityPlugin};
 use gnomon_sched::{
     BackfillPolicy, BiasConfig, BiasCorrectedEstimator, GuardMode, NarrowAhead, Policy,
     QuantileEstimator, RuntimeEstimator, ShadowPolicy, WideSafeBackfill,
 };
-use gnomon_sim::{metrics, replay, swf, Machine, SimJob, Simulator};
+use gnomon_sim::{metrics, priority, replay, swf, Machine, SimJob, Simulator};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -135,6 +139,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(v)
         }
         _ => None,
+    };
+    let plugin = match args.iter().position(|a| a == "--priority-plugin") {
+        Some(i) if i + 1 < args.len() => {
+            let path = args.remove(i + 1);
+            args.remove(i);
+            let p = PriorityPlugin::from_file(&path, PluginLimits::default())
+                .map_err(|e| format!("--priority-plugin {path}: {e}"))?;
+            Some((path, p))
+        }
+        Some(_) => return Err("--priority-plugin needs a path".into()),
+        None => None,
     };
     let run = |e: &str| only.as_deref().is_none_or(|o| o == e);
     let dir = args
@@ -438,7 +453,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             agreement * 100.0
         );
     }
-    if run("e0") || run("e3") {
+    // ---------------- E4: candidate priority plugin ----------------------
+    if let Some((path, plugin)) = plugin.as_ref().filter(|_| run("e4")) {
+        let mut csv4 = String::from("trace,offset,priorities,jobs,mean_wait_h,p95_wait_h,mean_bsld,wide_wait_h,utilization,fcfs_agreement,plugin_failures\n");
+        writeln!(md, "## E4 — priority plugin `{path}` vs FCFS\n").unwrap();
+        writeln!(md, "| trace @offset | priorities | mean wait h | p95 wait h | mean bsld | wide wait h | FCFS pair agreement | plugin failures |\n|---|---|---|---|---|---|---|---|").unwrap();
+        for t in &traces {
+            for &off in &offsets {
+                let fcfs = t.window(off, n);
+                let mut cand = fcfs.clone();
+                let mut failures = 0u64;
+                // As the controller does: plugin at submit time, FCFS (0) on failure.
+                priority::assign(&mut cand, |j, now| {
+                    plugin.priority(j, now).unwrap_or_else(|_| {
+                        failures += 1;
+                        0
+                    })
+                });
+                for (label, w, fails) in [("fcfs", &fcfs, 0), ("plugin", &cand, failures)] {
+                    let mut sim = Simulator::new(
+                        Machine::single(t.max_procs),
+                        Arc::new(BackfillPolicy::new(WINDOW_SECS)),
+                    );
+                    sim.record = false;
+                    let s = metrics::summarize(&sim.run(w), t.max_procs);
+                    let agree = priority::fcfs_agreement(w);
+                    writeln!(
+                        csv4,
+                        "{},{off},{label},{},{:.4},{:.4},{:.3},{:.4},{:.4},{agree:.4},{fails}",
+                        t.name,
+                        s.jobs,
+                        s.mean_wait_h,
+                        s.p95_wait_h,
+                        s.mean_bsld,
+                        s.wide_wait_h,
+                        s.utilization
+                    )
+                    .unwrap();
+                    writeln!(
+                        md,
+                        "| {} @{off} | {label} | {:.2} | {:.2} | {:.1} | {:.2} | {:.1}% | {fails} |",
+                        t.name, s.mean_wait_h, s.p95_wait_h, s.mean_bsld, s.wide_wait_h, agree * 100.0
+                    )
+                    .unwrap();
+                    eprintln!(
+                        "E4 {} @{off} {label}: wait {:.2}h bsld {:.1} agreement {:.1}%",
+                        t.name,
+                        s.mean_wait_h,
+                        s.mean_bsld,
+                        agree * 100.0
+                    );
+                }
+            }
+        }
+        writeln!(md).unwrap();
+        std::fs::write(format!("{out}/e4_priority_plugin.csv"), &csv4)?;
+    }
+    if run("e0") || run("e3") || (plugin.is_some() && run("e4")) {
         std::fs::write(format!("{out}/SUMMARY_raw.md"), md)?;
     }
     Ok(())

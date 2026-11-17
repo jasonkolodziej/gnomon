@@ -12,10 +12,13 @@
 //!   under a different policy: a counterfactual, using the real code.
 //! * `ShadowPolicy` (in `gnomon-sched`) — run a candidate next to the live
 //!   policy and record disagreements without acting on them.
+//! * [`priority`] — assign submit-time priorities from a candidate function
+//!   (a WASM priority plugin, say) and measure how it reorders the queue.
 //!
 //! Workloads can also come from Standard Workload Format traces ([`swf`]).
 
 pub mod metrics;
+pub mod priority;
 pub mod replay;
 pub mod swf;
 

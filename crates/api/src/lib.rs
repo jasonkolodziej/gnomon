@@ -30,6 +30,25 @@ use pb::*;
 pub struct SchedulerSvc {
     pub fsm: Arc<Fsm>,
     pub broker: Arc<EvalBroker>,
+    /// Controller-side priority (ADR 0002). `None` keeps the priority the
+    /// client sent.
+    pub priority: Option<Arc<dyn SubmitPriority>>,
+}
+
+/// Computes a submitted job's priority on the controller, before the
+/// `JobSubmitted` event is built; the value is recorded in the event, so
+/// replicas and replay never call this. `gnomon-ctl` implements it with a
+/// WASM plugin and a declarative fallback (`gnomon-policy`), which keeps
+/// wasmtime out of the crates that only need the API client.
+pub trait SubmitPriority: Send + Sync {
+    /// Priority of `job` at `now` (the FSM clock, Unix seconds).
+    fn priority(&self, job: &Job, now: u64) -> u64;
+}
+
+impl<F: Fn(&Job, u64) -> u64 + Send + Sync> SubmitPriority for F {
+    fn priority(&self, job: &Job, now: u64) -> u64 {
+        self(job, now)
+    }
 }
 
 impl SchedulerSvc {
@@ -123,6 +142,11 @@ impl Scheduler for SchedulerSvc {
         // took it first the FSM rejects ours, and we retry with a fresh id.
         for attempt in 0..SUBMIT_ATTEMPTS {
             job.id = self.fsm.next_job_id();
+            // Computed here, before the event exists, and recorded in it:
+            // replicas and replay apply the value and never run the plugin.
+            if let Some(p) = &self.priority {
+                job.priority = p.priority(&job, self.fsm.now());
+            }
             if self.commit(Event::JobSubmitted(job.clone()))?.accepted {
                 self.broker.enqueue(&job, self.fsm.index());
                 return Ok(Response::new(SubmitJobReply { job_id: job.id.0 }));
@@ -409,6 +433,7 @@ mod tests {
         SchedulerSvc {
             fsm: Arc::new(Fsm::recording(Arc::new(SystemClock))),
             broker: Arc::new(EvalBroker::new()),
+            priority: None,
         }
     }
 
@@ -445,6 +470,28 @@ mod tests {
         .unwrap()
         .into_inner()
         .job_id
+    }
+
+    #[tokio::test]
+    async fn submit_records_the_controller_priority_in_the_event() {
+        let mut s = svc();
+        let now = s.fsm.now();
+        s.priority = Some(Arc::new(move |j: &Job, t: u64| {
+            assert!(t >= now);
+            100 * u64::from(j.node_count()) + j.id.0
+        }));
+        let id = submit(&s, 2).await;
+        assert_eq!(job(&s, id).await.priority, 200 + id);
+        // The value is in the committed event, so replay never recomputes it.
+        let recorded = s.fsm.journal().iter().any(|e| {
+            matches!(&e.event, Event::JobSubmitted(j) if j.id.0 == id && j.priority == 200 + id)
+        });
+        assert!(recorded);
+
+        // Without one the client's priority is kept.
+        let s = svc();
+        let id = submit(&s, 1).await;
+        assert_eq!(job(&s, id).await.priority, 1);
     }
 
     async fn job(s: &SchedulerSvc, id: u64) -> JobInfo {
@@ -687,6 +734,7 @@ mod container_tests {
         SchedulerSvc {
             fsm: Arc::new(Fsm::new()),
             broker: Arc::new(EvalBroker::new()),
+            priority: None,
         }
     }
 

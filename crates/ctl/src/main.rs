@@ -25,6 +25,7 @@
 use gnomon_consensus::replica::{self, Peers};
 use gnomon_core::{Clock, Event, Job, Resources, SystemClock, Walltime};
 use gnomon_fsm::Fsm;
+use gnomon_policy::{PluginLimits, PolicyConfig, PriorityHook, PriorityPlugin};
 use gnomon_sched::{BackfillPolicy, EvalBroker, PlanApplier, Policy};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -101,6 +102,78 @@ fn raft_config(
         }
         _ => Err("--raft-id and --raft-peers go together".into()),
     }
+}
+
+/// Controller-side priority (ADR 0002). `--priority-plugin PATH`
+/// (`GNOMON_PRIORITY_PLUGIN`) loads a WASM component; `--policy-config PATH`
+/// (`GNOMON_POLICY_CONFIG`) sets the declarative policy it falls back to.
+/// With neither, `None`: jobs keep the priority their client sent.
+/// `--plugin-fuel` / `--plugin-memory-mb` (`GNOMON_PLUGIN_FUEL`,
+/// `GNOMON_PLUGIN_MEMORY_MB`) bound each call. A plugin or config that does
+/// not load stops startup: replicas must all run the same policy.
+fn priority_hook(
+    args: &[String],
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Option<PriorityHook>, String> {
+    let plugin = flag(args, "priority-plugin", env("GNOMON_PRIORITY_PLUGIN"))?;
+    let config = flag(args, "policy-config", env("GNOMON_POLICY_CONFIG"))?;
+    let defaults = PluginLimits::default();
+    let number = |name: &str, var: &str, default: u64| -> Result<u64, String> {
+        match flag(args, name, env(var))? {
+            None => Ok(default),
+            Some(v) => match v.parse::<u64>() {
+                Ok(n) if n > 0 => Ok(n),
+                _ => Err(format!("--{name} '{v}' is not a positive number")),
+            },
+        }
+    };
+    let limits = PluginLimits {
+        fuel: number("plugin-fuel", "GNOMON_PLUGIN_FUEL", defaults.fuel)?,
+        max_memory_bytes: number(
+            "plugin-memory-mb",
+            "GNOMON_PLUGIN_MEMORY_MB",
+            (defaults.max_memory_bytes >> 20) as u64,
+        )?
+        .checked_mul(1 << 20)
+        .and_then(|b| usize::try_from(b).ok())
+        .ok_or("--plugin-memory-mb is too large")?,
+    };
+    if plugin.is_none() && config.is_none() {
+        return Ok(None);
+    }
+    let fallback = match &config {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("--policy-config {path}: {e}"))?;
+            PolicyConfig::from_json(&text).map_err(|e| format!("--policy-config {path}: {e}"))?
+        }
+        None => PolicyConfig::default(),
+    };
+    let plugin = plugin
+        .map(|path| {
+            PriorityPlugin::from_file(&path, limits)
+                .map_err(|e| format!("--priority-plugin {path}: {e}"))
+        })
+        .transpose()?;
+    Ok(Some(PriorityHook::new(plugin, fallback)))
+}
+
+/// The submit handler's priority: `hook`, logging each plugin failure (the
+/// job then gets the declarative priority) with the running failure count.
+fn submit_priority(hook: PriorityHook) -> Arc<dyn gnomon_api::SubmitPriority> {
+    Arc::new(move |job: &Job, now: u64| {
+        let (priority, err) = hook.priority(job, now);
+        if let Some(e) = err {
+            eprintln!(
+                "gnomon-ctl: priority plugin failed for job {} ({} of {} calls failed so far); \
+                 using declarative priority {priority}: {e}",
+                job.id.0,
+                hook.failures.load(Ordering::Relaxed),
+                hook.calls.load(Ordering::Relaxed),
+            );
+        }
+        priority
+    })
 }
 
 /// Whether this controller may schedule: always when standalone, only while
@@ -274,6 +347,13 @@ async fn main() {
         .unwrap_or_else(|| "0.0.0.0:7631".into()); // neighbors Slurm's 6817
     let raft = raft_config(args, env("GNOMON_RAFT_ID"), env("GNOMON_RAFT_PEERS"))
         .unwrap_or_else(|e| fail(e));
+    let hook = priority_hook(args, env).unwrap_or_else(|e| fail(e));
+    match hook.as_ref().map(PriorityHook::has_plugin) {
+        Some(true) => println!("gnomon-ctl: priorities from a WASM plugin (declarative fallback)"),
+        Some(false) => println!("gnomon-ctl: priorities from the declarative policy"),
+        None => {}
+    }
+    let priority = hook.map(submit_priority);
     let broker = Arc::new(EvalBroker::new());
     let (fsm, role, _replica) = match raft {
         Some((id, peers)) => {
@@ -419,7 +499,14 @@ async fn main() {
         .unwrap_or_else(|e| fail(format!("--listen '{listen}': {e}")));
     println!("gnomon-ctl listening on {addr}");
     tonic::transport::Server::builder()
-        .add_service(SchedulerSvc { fsm, broker }.server())
+        .add_service(
+            SchedulerSvc {
+                fsm,
+                broker,
+                priority,
+            }
+            .server(),
+        )
         .serve(addr)
         .await
         .expect("gRPC server");
@@ -517,6 +604,84 @@ mod tests {
         );
         assert!(flag(&args(&["--listen"]), "listen", None).is_err());
     }
+
+    #[test]
+    fn priority_hook_needs_a_plugin_or_a_config_and_loads_both() {
+        let none = |_: &str| None;
+        assert!(priority_hook(&[], none).unwrap().is_none());
+
+        let dir = std::env::temp_dir().join(format!("gnomon-ctl-plugin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wat = dir.join("p.wat");
+        std::fs::write(&wat, gnomon_policy::fixtures::size_age()).unwrap();
+        let cfg = dir.join("policy.json");
+        std::fs::write(&cfg, POLICY_JSON).unwrap();
+        let w = wat.to_str().unwrap();
+        let c = cfg.to_str().unwrap();
+
+        let hook = priority_hook(&args(&["--priority-plugin", w]), none).unwrap();
+        assert!(hook.unwrap().has_plugin());
+        let env = |k: &str| (k == "GNOMON_PRIORITY_PLUGIN").then(|| w.to_string());
+        assert!(priority_hook(&[], env).unwrap().unwrap().has_plugin());
+        let hook = priority_hook(&args(&["--policy-config", c]), none).unwrap();
+        assert!(!hook.unwrap().has_plugin());
+
+        for bad in [
+            &["--priority-plugin", "/nonexistent.wasm"][..],
+            &["--policy-config", "/nonexistent.json"],
+            &["--priority-plugin", w, "--plugin-fuel", "0"],
+            &["--priority-plugin", w, "--plugin-memory-mb", "lots"],
+            &["--priority-plugin"],
+        ] {
+            assert!(priority_hook(&args(bad), none).is_err(), "{bad:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn submissions_get_plugin_priorities_and_fall_back_on_failure() {
+        use gnomon_api::pb::{scheduler_server::Scheduler, GetJobRequest, SubmitJobRequest};
+        use gnomon_policy::fixtures;
+        let svc = |wat: String| {
+            let plugin = PriorityPlugin::from_bytes(wat.as_bytes(), PluginLimits::default());
+            let hook = PriorityHook::new(Some(plugin.unwrap()), PolicyConfig::default());
+            gnomon_api::SchedulerSvc {
+                fsm: Arc::new(Fsm::new()),
+                broker: Arc::new(EvalBroker::new()),
+                priority: Some(submit_priority(hook)),
+            }
+        };
+        let submitted_priority = |s: gnomon_api::SchedulerSvc| async move {
+            let req = SubmitJobRequest {
+                name: "j".into(),
+                user: "u".into(),
+                request: Some(gnomon_api::pb::Resources {
+                    cores: 4,
+                    mem_mb: 0,
+                    gpus: 0,
+                }),
+                walltime_secs: 60,
+                priority: 1,
+                nodes: 2,
+                ..Default::default()
+            };
+            let id = s.submit_job(tonic::Request::new(req)).await.unwrap();
+            let get = GetJobRequest {
+                job_id: id.into_inner().job_id,
+                wait_index: 0,
+            };
+            let job = s.get_job(tonic::Request::new(get)).await.unwrap();
+            job.into_inner().job.unwrap().priority
+        };
+        // strings: user "u" (117) * 1000 + "normal".len().
+        assert_eq!(submitted_priority(svc(fixtures::strings())).await, 117_006);
+        // A trapping plugin: the declarative priority, weight_jobsize 100 *
+        // (2 nodes * 4 cores), not the client's 1.
+        assert_eq!(submitted_priority(svc(fixtures::trap())).await, 800);
+    }
+
+    const POLICY_JSON: &str =
+        r#"{"weight_age":1,"weight_jobsize":1,"weight_qos":0,"qos_tiers":[],"partitions":[]}"#;
 
     fn submit(fsm: &Fsm, id: u64, cores: u32) {
         fsm.apply(Event::JobSubmitted(Job::new(
