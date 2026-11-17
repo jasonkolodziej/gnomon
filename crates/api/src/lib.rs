@@ -30,23 +30,26 @@ use pb::*;
 pub struct SchedulerSvc {
     pub fsm: Arc<Fsm>,
     pub broker: Arc<EvalBroker>,
-    /// Controller-side priority (ADR 0002). `None` keeps the priority the
-    /// client sent.
-    pub priority: Option<Arc<dyn SubmitPriority>>,
+    /// Controller-side submit policy: admission and priority (ADR 0002,
+    /// 0003). `None` accepts every job with the priority the client sent.
+    pub submit_policy: Option<Arc<dyn SubmitPolicy>>,
 }
 
-/// Computes a submitted job's priority on the controller, before the
-/// `JobSubmitted` event is built; the value is recorded in the event, so
-/// replicas and replay never call this. `gnomon-ctl` implements it with a
-/// WASM plugin and a declarative fallback (`gnomon-policy`), which keeps
-/// wasmtime out of the crates that only need the API client.
-pub trait SubmitPriority: Send + Sync {
-    /// Priority of `job` at `now` (the FSM clock, Unix seconds).
-    fn priority(&self, job: &Job, now: u64) -> u64;
+/// Runs on the controller for every submission, before the `JobSubmitted`
+/// event is built: it may rewrite the job's request, must set its priority,
+/// or rejects it with a reason for the submitter. The prepared job is what
+/// the event records, so replicas and replay never call this. `gnomon-ctl`
+/// implements it with WASM plugins and declarative fallbacks
+/// (`gnomon-policy`), which keeps wasmtime out of the crates that only need
+/// the API client.
+pub trait SubmitPolicy: Send + Sync {
+    /// Prepare `job` (its id is already assigned) at `now` (the FSM clock,
+    /// Unix seconds). `Err` is the rejection reason.
+    fn prepare(&self, job: &mut Job, now: u64) -> Result<(), String>;
 }
 
-impl<F: Fn(&Job, u64) -> u64 + Send + Sync> SubmitPriority for F {
-    fn priority(&self, job: &Job, now: u64) -> u64 {
+impl<F: Fn(&mut Job, u64) -> Result<(), String> + Send + Sync> SubmitPolicy for F {
+    fn prepare(&self, job: &mut Job, now: u64) -> Result<(), String> {
         self(job, now)
     }
 }
@@ -140,12 +143,16 @@ impl Scheduler for SchedulerSvc {
         job.container = Some(r.container).filter(|c| !c.is_empty());
         // The id is this replica's next free one; if a concurrent submission
         // took it first the FSM rejects ours, and we retry with a fresh id.
+        let submitted = job;
         for attempt in 0..SUBMIT_ATTEMPTS {
+            let mut job = submitted.clone();
             job.id = self.fsm.next_job_id();
-            // Computed here, before the event exists, and recorded in it:
-            // replicas and replay apply the value and never run the plugin.
-            if let Some(p) = &self.priority {
-                job.priority = p.priority(&job, self.fsm.now());
+            // Prepared here, before the event exists, and recorded in it:
+            // replicas and replay apply the result and never run the policy.
+            if let Some(p) = &self.submit_policy {
+                p.prepare(&mut job, self.fsm.now()).map_err(|reason| {
+                    Status::permission_denied(format!("rejected by site policy: {reason}"))
+                })?;
             }
             if self.commit(Event::JobSubmitted(job.clone()))?.accepted {
                 self.broker.enqueue(&job, self.fsm.index());
@@ -433,7 +440,7 @@ mod tests {
         SchedulerSvc {
             fsm: Arc::new(Fsm::recording(Arc::new(SystemClock))),
             broker: Arc::new(EvalBroker::new()),
-            priority: None,
+            submit_policy: None,
         }
     }
 
@@ -473,22 +480,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_records_the_controller_priority_in_the_event() {
+    async fn submit_records_the_prepared_job_in_the_event() {
         let mut s = svc();
         let now = s.fsm.now();
-        s.priority = Some(Arc::new(move |j: &Job, t: u64| {
+        s.submit_policy = Some(Arc::new(move |j: &mut Job, t: u64| {
             assert!(t >= now);
-            100 * u64::from(j.node_count()) + j.id.0
+            if j.nodes > 4 {
+                return Err("at most 4 nodes".into());
+            }
+            j.partition = "rewritten".into();
+            j.priority = 100 * u64::from(j.node_count()) + j.id.0;
+            Ok(())
         }));
         let id = submit(&s, 2).await;
-        assert_eq!(job(&s, id).await.priority, 200 + id);
-        // The value is in the committed event, so replay never recomputes it.
+        let info = job(&s, id).await;
+        assert_eq!(
+            (info.priority, info.partition.as_str()),
+            (200 + id, "rewritten")
+        );
+        // The prepared job is the committed event, so replay never reruns it.
         let recorded = s.fsm.journal().iter().any(|e| {
-            matches!(&e.event, Event::JobSubmitted(j) if j.id.0 == id && j.priority == 200 + id)
+            matches!(&e.event, Event::JobSubmitted(j)
+                if j.id.0 == id && j.priority == 200 + id && j.partition == "rewritten")
         });
         assert!(recorded);
 
-        // Without one the client's priority is kept.
+        let err = s
+            .submit_job(Request::new(SubmitJobRequest {
+                nodes: 5,
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(
+            err.message().contains("at most 4 nodes"),
+            "{}",
+            err.message()
+        );
+
+        // Without a policy the client's priority is kept.
         let s = svc();
         let id = submit(&s, 1).await;
         assert_eq!(job(&s, id).await.priority, 1);
@@ -734,7 +765,7 @@ mod container_tests {
         SchedulerSvc {
             fsm: Arc::new(Fsm::new()),
             broker: Arc::new(EvalBroker::new()),
-            priority: None,
+            submit_policy: None,
         }
     }
 
