@@ -1,0 +1,14 @@
+[package]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+name = "gnomon-ctl"
+description = "Controller daemon: FSM + broker + workers + applier + gRPC API"
+[dependencies]
+gnomon-core = { path = "../core" }
+gnomon-fsm = { path = "../fsm" }
+gnomon-sched = { path = "../sched" }
+gnomon-api = { path = "../api" }
+gnomon-consensus = { path = "../consensus" }
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"

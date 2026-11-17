@@ -1,0 +1,6 @@
+t05_submit_rate	134.5
+t05_drain_s	19
+t08_rank_start_spread_ms	134
+t10_fill_s	2
+t11_distinct_nodes	3
+t12_gang_failure_to_end_s	8

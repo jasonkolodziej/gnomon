@@ -1,0 +1,2 @@
+t08	PASS	3 ranks on 3 distinct nodes (node1:1 node2:1 node3:1); start spread 5 ms
+t12	PASS	rank 0 exited 3 after 2 s; 2 peers stopped, job FAILED 8s after submit

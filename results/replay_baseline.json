@@ -1,0 +1,70 @@
+{
+  "scenarios": {
+    "swf/CTC-SP2@10000x5000": {
+      "jobs": 5000,
+      "mean_wait_h": 3.2239472777777776,
+      "p95_wait_h": 14.5575,
+      "mean_bsld": 45.01868189747877,
+      "wide_wait_h": 10.33830808080808,
+      "utilization": 0.8227074356876776,
+      "unplaced": 0,
+      "replay_exact": true,
+      "starts_identical": true
+    },
+    "swf/HPC2N-2002@10000x5000": {
+      "jobs": 5000,
+      "mean_wait_h": 1.7038915,
+      "p95_wait_h": 12.544166666666667,
+      "mean_bsld": 44.4782579308517,
+      "wide_wait_h": 2.019667508417508,
+      "utilization": 0.593707964674166,
+      "unplaced": 0,
+      "replay_exact": true,
+      "starts_identical": true
+    },
+    "swf/SDSC-SP2@10000x5000": {
+      "jobs": 5000,
+      "mean_wait_h": 3.352052666666667,
+      "p95_wait_h": 18.398055555555555,
+      "mean_bsld": 41.1856547204183,
+      "wide_wait_h": 6.463453947368421,
+      "utilization": 0.6916309575504934,
+      "unplaced": 0,
+      "replay_exact": true,
+      "starts_identical": true
+    },
+    "synthetic/cluster-16x16": {
+      "jobs": 3000,
+      "mean_wait_h": 0.34064564814814813,
+      "p95_wait_h": 1.6283333333333334,
+      "mean_bsld": 1.888824162773038,
+      "wide_wait_h": 0.0,
+      "utilization": 0.8330840194972813,
+      "unplaced": 0,
+      "replay_exact": true,
+      "starts_identical": true
+    },
+    "synthetic/cluster-16x16-gangs": {
+      "jobs": 2000,
+      "mean_wait_h": 1.75248125,
+      "p95_wait_h": 6.251666666666667,
+      "mean_bsld": 3.793518841609295,
+      "wide_wait_h": 4.508022598870056,
+      "utilization": 0.7670890898688855,
+      "unplaced": 0,
+      "replay_exact": true,
+      "starts_identical": true
+    },
+    "synthetic/single-128": {
+      "jobs": 3000,
+      "mean_wait_h": 3.173789351851852,
+      "p95_wait_h": 9.233888888888888,
+      "mean_bsld": 8.18702008452625,
+      "wide_wait_h": 4.340163588201603,
+      "utilization": 0.8656400389366213,
+      "unplaced": 0,
+      "replay_exact": true,
+      "starts_identical": true
+    }
+  }
+}

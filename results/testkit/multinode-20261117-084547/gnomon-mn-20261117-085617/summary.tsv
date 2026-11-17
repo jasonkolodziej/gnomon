@@ -1,0 +1,11 @@
+t01	PASS	job 0 completed; wait 2s
+t02	PASS	job sees cpus=4 (nproc=4; equals 4 only with cgroup confinement)
+t03	PASS	C backfilled 236s before wide B; D waited for B (+32s)
+t04	PASS	queued job 7 cancelled, never ran
+t05	PASS	50 jobs; submit 141.1 jobs/s; drained in 19s
+t06	PASS	killed at limit (state FAILED)
+t07	PASS	exit 3 -> FAILED
+t08	PASS	3 ranks on 3 distinct nodes (node1:1 node2:1 node3:1); start spread 104 ms
+t09	PASS	3 whole-node jobs on 3 distinct nodes, all running together
+t10	PASS	12 jobs in one wave, all started 2s after the first submit (node1:4 node2:4 node3:4)
+t11	INFO	spreads: 3 1-core jobs on 3 nodes (node1:1 node2:1 node3:1)

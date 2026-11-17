@@ -1,0 +1,2 @@
+test=t05 tag=b7 jobid=14 event=start t=1794907113 host=node3 cpus=1 nproc=4
+test=t05 tag=b7 jobid=14 event=end t=1794907115 code=0

@@ -1,0 +1,2 @@
+test=t03 tag=A-blocker jobid=3 event=start t=1794905176 host=node1 cpus=3 nproc=4
+test=t03 tag=A-blocker jobid=3 event=end t=1794905416 code=0

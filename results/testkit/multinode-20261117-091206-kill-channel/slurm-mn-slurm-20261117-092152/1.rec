@@ -1,0 +1,2 @@
+test=t08 tag=gang jobid=1 event=start t=1794907317 host=node1 cpus=2 nproc=4
+test=t08 tag=gang jobid=1 event=end t=1794907327 code=0

@@ -1,0 +1,14 @@
+[package]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+name = "gnomon-consensus"
+description = "Embedded Raft (openraft) over the FSM: replicated event log, leader election, failover"
+[dependencies]
+gnomon-core = { path = "../core" }
+gnomon-fsm = { path = "../fsm" }
+openraft = { version = "0.9", features = ["serde"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+serde_json = "1"

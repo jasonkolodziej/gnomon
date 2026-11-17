@@ -1,0 +1,32 @@
+# Gnomon node agent. Install to /etc/systemd/system/ (see docs/INSTALL.md).
+# Settings live in /etc/gnomon/gnomon-agent.env (GNOMON_ADDR, GNOMON_NODE, GNOMON_WORKDIR, ...).
+#
+# Runs as root, like slurmd: each job runs as the user who submitted it, never as root.
+# Delegate=yes hands the unit's cgroup to the agent; DelegateSubgroup= (systemd 254+) moves the
+# agent itself into a "supervisor" child, so the unit's cgroup holds no processes and can serve as
+# GNOMON_CGROUP_ROOT. Jobs then live under <unit cgroup>/gnomon/job_<id>_r<rank>.
+# On systemd < 254, remove DelegateSubgroup= and see docs/INSTALL.md ("Older systemd").
+[Unit]
+Description=Gnomon node agent
+Documentation=https://github.com/jasonkolodziej/gnomon/blob/main/docs/INSTALL.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Delegate=yes
+DelegateSubgroup=supervisor
+Environment=GNOMON_CGROUP_ROOT=/sys/fs/cgroup/system.slice/gnomon-agent.service
+EnvironmentFile=-/etc/gnomon/gnomon-agent.env
+ExecStart=/usr/local/bin/gnomon-agent
+# Stop: SIGTERM goes to the agent only. It stops its running jobs (cgroup.kill, or docker/podman
+# kill for container jobs), reports each as exit 143 and exits, within 60 s. Anything left after
+# TimeoutStopSec is SIGKILLed with the rest of the unit's cgroup.
+KillMode=mixed
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,2 @@
+backend=slurm started=2026-11-17T09:21:52+00:00 host=head scale=1 nodes=3 cores/node=4
+partition=debug node=any slurm=slurm-wlm 23.11.4

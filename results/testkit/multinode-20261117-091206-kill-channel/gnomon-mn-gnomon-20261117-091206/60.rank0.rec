@@ -1,0 +1,2 @@
+test=t08 tag=gang jobid=60 rank=0 nnodes=3 event=start t=1794907200.957710570 host=node1 nodelist=node1,node2,node3 cpus=2
+test=t08 tag=gang jobid=60 rank=0 event=end t=1794907210.964397827 code=0

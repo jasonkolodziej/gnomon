@@ -1,0 +1,9 @@
+[package]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+name = "gnomon-graph"
+description = "Directed resource graph with per-vertex temporal planners (Fluxion-style)"
+[dependencies]
+gnomon-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }

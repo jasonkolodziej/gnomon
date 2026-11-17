@@ -1,0 +1,12 @@
+# Only the workspace sources (and, for release images, dist/) are needed in the build context.
+.git
+target
+graphify-out
+results
+assets
+docs
+testkit
+.github
+.agents
+.claude
+**/*.log

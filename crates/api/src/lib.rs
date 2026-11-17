@@ -1,0 +1,827 @@
+//! Phase 3: lock-free async API tier (report section 4.3).
+//!
+//! Every read handler serves from an immutable FSM snapshot — the scheduler
+//! never blocks the API, structurally fixing `slurmctld`'s RPC stalls.
+//! `ListJobs` returns the snapshot's Raft-style index; `GetJob(wait_index)`
+//! implements Nomad-style blocking queries ("return once state passes index
+//! N"), giving clients linearizable-ish reads without polling.
+//!
+//! Writes go through `Fsm::try_apply`: on a replicated controller they are
+//! committed through Raft (forwarded to the leader from followers), and a
+//! write that cannot be committed is reported as `UNAVAILABLE`. `FetchWork`
+//! also carries the node's kill list (gang peers of a failed rank, running
+//! jobs that were cancelled).
+
+use gnomon_core::{Event, Job, JobId, JobState, Resources, Walltime};
+use gnomon_fsm::{Fsm, GangRelease};
+use gnomon_sched::EvalBroker;
+use std::sync::Arc;
+use std::time::Duration;
+use tonic::{Request, Response, Status};
+
+#[allow(clippy::result_large_err)]
+pub mod pb {
+    tonic::include_proto!("gnomon.v1");
+}
+
+use pb::scheduler_server::{Scheduler, SchedulerServer};
+use pb::*;
+
+pub struct SchedulerSvc {
+    pub fsm: Arc<Fsm>,
+    pub broker: Arc<EvalBroker>,
+}
+
+impl SchedulerSvc {
+    pub fn server(self) -> SchedulerServer<Self> {
+        SchedulerServer::new(self)
+    }
+
+    /// Apply a write (replicated: commit it through Raft). A write that
+    /// could not be committed (no leader or quorum) is `UNAVAILABLE`, so
+    /// clients retry instead of believing it took effect.
+    #[allow(clippy::result_large_err)] // tonic's own handler error type
+    fn commit(&self, ev: Event) -> Result<gnomon_fsm::Applied, Status> {
+        self.fsm
+            .try_apply(ev)
+            .map_err(|e| Status::unavailable(format!("write not committed: {e}")))
+    }
+}
+
+/// Attempts at finding a free job id when concurrent submissions (possibly
+/// through different replicas) race for the same one.
+const SUBMIT_ATTEMPTS: usize = 50;
+
+fn state_name(s: JobState) -> String {
+    match s {
+        JobState::Pending => "PENDING",
+        JobState::Reserved => "RESERVED",
+        JobState::Running => "RUNNING",
+        JobState::Completed => "COMPLETED",
+        JobState::Cancelled => "CANCELLED",
+        JobState::Failed => "FAILED",
+    }
+    .into()
+}
+
+/// Wire view of a job. `nodes` lists every node the job holds (all ranks
+/// of a gang, in rank order) once it has been placed; `planned_dur` falls
+/// back to the walltime when the scheduler has not chosen a shorter
+/// (predicted) span yet, so clients such as gntop can draw the plan.
+fn job_info(j: &Job, nodes: Vec<String>) -> JobInfo {
+    JobInfo {
+        id: j.id.0,
+        name: j.name.clone(),
+        user: j.user.clone(),
+        partition: j.partition.clone(),
+        state: state_name(j.state),
+        request: Some(pb::Resources {
+            cores: j.request.cores,
+            mem_mb: j.request.mem_mb,
+            gpus: j.request.gpus,
+        }),
+        walltime_secs: j.walltime.secs(),
+        priority: j.priority,
+        submit_time: j.submit_time,
+        planned_start: j.planned_start.unwrap_or(0),
+        nodes,
+        num_nodes: j.node_count(),
+        planned_dur: j.planned_dur.unwrap_or_else(|| j.walltime.secs()),
+        container: j.container.clone().unwrap_or_default(),
+    }
+}
+
+#[tonic::async_trait]
+impl Scheduler for SchedulerSvc {
+    async fn submit_job(
+        &self,
+        req: Request<SubmitJobRequest>,
+    ) -> Result<Response<SubmitJobReply>, Status> {
+        let r = req.into_inner();
+        let res = r.request.unwrap_or_default();
+        let mut job = Job::new(
+            JobId(0),
+            &r.name,
+            &r.user,
+            Resources {
+                cores: res.cores,
+                mem_mb: res.mem_mb,
+                gpus: res.gpus,
+            },
+            Walltime(Duration::from_secs(r.walltime_secs.max(1))),
+        );
+        job.partition = if r.partition.is_empty() {
+            "normal".into()
+        } else {
+            r.partition
+        };
+        job.priority = r.priority;
+        job.command = r.command;
+        job.nodes = r.nodes.max(1);
+        job.container = Some(r.container).filter(|c| !c.is_empty());
+        // The id is this replica's next free one; if a concurrent submission
+        // took it first the FSM rejects ours, and we retry with a fresh id.
+        for attempt in 0..SUBMIT_ATTEMPTS {
+            job.id = self.fsm.next_job_id();
+            if self.commit(Event::JobSubmitted(job.clone()))?.accepted {
+                self.broker.enqueue(&job, self.fsm.index());
+                return Ok(Response::new(SubmitJobReply { job_id: job.id.0 }));
+            }
+            tokio::time::sleep(Duration::from_millis(5 << attempt.min(4))).await;
+        }
+        Err(Status::unavailable("could not allocate a job id; retry"))
+    }
+
+    async fn cancel_job(
+        &self,
+        req: Request<CancelJobRequest>,
+    ) -> Result<Response<CancelJobReply>, Status> {
+        let r = req.into_inner();
+        let ok = self.commit(Event::JobCancelled(JobId(r.job_id)))?.accepted;
+        Ok(Response::new(CancelJobReply { ok }))
+    }
+
+    async fn get_job(&self, req: Request<GetJobRequest>) -> Result<Response<GetJobReply>, Status> {
+        let r = req.into_inner();
+        // Index-aware blocking query: wait until state moves past wait_index.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let snap = self.fsm.snapshot();
+            if snap.index > r.wait_index {
+                let job = snap
+                    .job(JobId(r.job_id))
+                    .ok_or_else(|| Status::not_found("no such job"))?;
+                let nodes = snap.state().job_nodes(job);
+                return Ok(Response::new(GetJobReply {
+                    job: Some(job_info(job, nodes)),
+                }));
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(Status::deadline_exceeded("state index not reached"));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn list_jobs(
+        &self,
+        req: Request<ListJobsRequest>,
+    ) -> Result<Response<ListJobsReply>, Status> {
+        let r = req.into_inner();
+        let snap = self.fsm.snapshot(); // lock-free read
+        let jobs = snap
+            .state()
+            .jobs
+            .values()
+            .filter(|j| r.user.is_empty() || j.user == r.user)
+            .filter(|j| r.state.is_empty() || state_name(j.state) == r.state)
+            .map(|j| job_info(j, snap.state().job_nodes(j)))
+            .collect();
+        Ok(Response::new(ListJobsReply {
+            jobs,
+            state_index: snap.index,
+        }))
+    }
+
+    async fn list_nodes(
+        &self,
+        _req: Request<ListNodesRequest>,
+    ) -> Result<Response<ListNodesReply>, Status> {
+        let snap = self.fsm.snapshot();
+        let nodes = snap
+            .nodes()
+            .map(|n| NodeInfo {
+                name: n.name.clone(),
+                capacity: Some(pb::Resources {
+                    cores: n.capacity.cores,
+                    mem_mb: n.capacity.mem_mb,
+                    gpus: n.capacity.gpus,
+                }),
+                allocated: Some(pb::Resources {
+                    cores: n.allocated.cores,
+                    mem_mb: n.allocated.mem_mb,
+                    gpus: n.allocated.gpus,
+                }),
+                last_heartbeat: n.last_heartbeat,
+                // The replicated loss decision, so `gninfo` agrees with
+                // placement and with the configurable node timeout.
+                alive: !n.down,
+            })
+            .collect();
+        Ok(Response::new(ListNodesReply { nodes }))
+    }
+
+    async fn register_node(
+        &self,
+        req: Request<RegisterNodeRequest>,
+    ) -> Result<Response<RegisterNodeReply>, Status> {
+        let r = req.into_inner();
+        let cap = r.capacity.unwrap_or_default();
+        self.commit(Event::NodeRegistered {
+            name: r.name,
+            capacity: Resources {
+                cores: cap.cores,
+                mem_mb: cap.mem_mb,
+                gpus: cap.gpus,
+            },
+        })?;
+        // Agents poll for work on this interval; GNOMON_HEARTBEAT_SECS on the
+        // controller shortens it (the test kit uses 2 s).
+        let hb = std::env::var("GNOMON_HEARTBEAT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        Ok(Response::new(RegisterNodeReply {
+            ok: true,
+            heartbeat_interval_secs: hb,
+        }))
+    }
+
+    async fn heartbeat(
+        &self,
+        req: Request<HeartbeatRequest>,
+    ) -> Result<Response<HeartbeatReply>, Status> {
+        let r = req.into_inner();
+        let a = r.allocated.unwrap_or_default();
+        self.commit(Event::Heartbeat {
+            name: r.name,
+            allocated: Resources {
+                cores: a.cores,
+                mem_mb: a.mem_mb,
+                gpus: a.gpus,
+            },
+        })?;
+        Ok(Response::new(HeartbeatReply { ok: true }))
+    }
+
+    async fn fetch_work(
+        &self,
+        req: Request<FetchWorkRequest>,
+    ) -> Result<Response<FetchWorkReply>, Status> {
+        let node = req.into_inner().node;
+        // Hand out the queued assignments, then drain exactly that many via a
+        // replicated event so each job is dispatched once (the skeleton
+        // re-sent the whole queue on every poll). Jobs cancelled meanwhile, and
+        // ranks already on this node's kill channel, are skipped but still
+        // drained.
+        let snap = self.fsm.snapshot();
+        let queued = snap
+            .state()
+            .assignments
+            .get(&node)
+            .cloned()
+            .unwrap_or_default();
+        let assignments = queued
+            .iter()
+            .filter_map(|a| {
+                let j = snap
+                    .job(a.job)
+                    .filter(|j| j.state == gnomon_core::JobState::Running)
+                    .filter(|_| !snap.state().is_killed(a.job, &node))?;
+                Some(fetch_work_reply::Assignment {
+                    job_id: a.job.0,
+                    command: a.command.clone(),
+                    start: a.start,
+                    request: Some(pb::Resources {
+                        cores: j.request.cores,
+                        mem_mb: j.request.mem_mb,
+                        gpus: j.request.gpus,
+                    }),
+                    walltime_secs: j.walltime.secs(),
+                    name: j.name.clone(),
+                    container: j.container.clone().unwrap_or_default(),
+                    nodelist: snap.state().job_nodes(j),
+                    rank: a.rank,
+                    user: j.user.clone(),
+                })
+            })
+            .collect();
+        let kill = snap.state().kills_for(&node).map(|j| j.0).collect();
+        let mut assignments: Vec<fetch_work_reply::Assignment> = assignments;
+        if !queued.is_empty() {
+            // Not committed: hand nothing out (the work stays queued).
+            let claimed = self
+                .commit(Event::AssignmentsFetched {
+                    node: node.clone(),
+                    count: queued.len(),
+                    items: queued.iter().map(|a| (a.job, a.rank)).collect(),
+                })?
+                .accepted;
+            // The claim is validated at commit: if the node was declared lost
+            // after the snapshot above, its queue went back to the planner and
+            // nothing may run here. Also drop anything no longer placed on this
+            // node by then, so a job can never run in two places.
+            if !claimed {
+                assignments.clear();
+            } else {
+                self.fsm.read(|st| {
+                    assignments.retain(|a| {
+                        st.jobs.get(&JobId(a.job_id)).is_some_and(|j| {
+                            j.state == gnomon_core::JobState::Running
+                                && st.job_nodes(j).contains(&node)
+                        })
+                    })
+                });
+            }
+        }
+        Ok(Response::new(FetchWorkReply { assignments, kill }))
+    }
+
+    /// Release barrier for gang ranks. Fetching a rank's work is recorded by
+    /// the replicated `AssignmentsFetched` event, so "every rank fetched" is
+    /// FSM state: agents poll this and start their rank once it is ready.
+    async fn gang_ready(
+        &self,
+        req: Request<GangReadyRequest>,
+    ) -> Result<Response<GangReadyReply>, Status> {
+        let job = JobId(req.into_inner().job_id);
+        let snap = self.fsm.snapshot();
+        let nodes = snap.job(job).map_or(0, |j| j.node_count());
+        let reply = match snap.state().gang_release(job) {
+            GangRelease::Released => GangReadyReply {
+                ready: true,
+                active: true,
+                fetched: nodes,
+                nodes,
+            },
+            GangRelease::Waiting { fetched, nodes } => GangReadyReply {
+                ready: false,
+                active: true,
+                fetched,
+                nodes,
+            },
+            GangRelease::NotRunning => GangReadyReply {
+                ready: false,
+                active: false,
+                fetched: 0,
+                nodes,
+            },
+        };
+        Ok(Response::new(reply))
+    }
+
+    async fn report_completion(
+        &self,
+        req: Request<ReportCompletionRequest>,
+    ) -> Result<Response<ReportCompletionReply>, Status> {
+        let r = req.into_inner();
+        let job = JobId(r.job_id);
+        let end = gnomon_core::now_secs();
+        // Gang ranks report individually; the FSM aggregates them so replay
+        // reproduces exactly when the job completed. Single-node jobs keep
+        // the plain JobFinished event.
+        let gang = self
+            .fsm
+            .read(|st| st.jobs.get(&job).is_some_and(Job::is_gang));
+        let ev = if gang {
+            Event::JobRankFinished {
+                job,
+                node: r.node,
+                end,
+                code: r.exit_code,
+            }
+        } else {
+            Event::JobFinished {
+                job,
+                end,
+                code: r.exit_code,
+            }
+        };
+        let ok = self.commit(ev)?.accepted;
+        Ok(Response::new(ReportCompletionReply { ok }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gnomon_core::SystemClock;
+    use gnomon_sched::{backfill_pass, BackfillPolicy, PassOptions, PlanApplier};
+
+    async fn gang_ready_of(s: &SchedulerSvc, id: u64) -> GangReadyReply {
+        s.gang_ready(Request::new(GangReadyRequest { job_id: id }))
+            .await
+            .unwrap()
+            .into_inner()
+    }
+
+    fn svc() -> SchedulerSvc {
+        SchedulerSvc {
+            fsm: Arc::new(Fsm::recording(Arc::new(SystemClock))),
+            broker: Arc::new(EvalBroker::new()),
+        }
+    }
+
+    async fn register(s: &SchedulerSvc, name: &str) {
+        s.register_node(Request::new(RegisterNodeRequest {
+            name: name.into(),
+            capacity: Some(pb::Resources {
+                cores: 4,
+                mem_mb: 1024,
+                gpus: 0,
+            }),
+        }))
+        .await
+        .unwrap();
+    }
+
+    async fn submit(s: &SchedulerSvc, nodes: u32) -> u64 {
+        s.submit_job(Request::new(SubmitJobRequest {
+            name: "mpi".into(),
+            user: "u".into(),
+            partition: String::new(),
+            request: Some(pb::Resources {
+                cores: 4,
+                mem_mb: 0,
+                gpus: 0,
+            }),
+            walltime_secs: 600,
+            priority: 1,
+            command: "app".into(),
+            nodes,
+            container: String::new(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .job_id
+    }
+
+    async fn job(s: &SchedulerSvc, id: u64) -> JobInfo {
+        s.get_job(Request::new(GetJobRequest {
+            job_id: id,
+            wait_index: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .job
+        .unwrap()
+    }
+
+    async fn report(s: &SchedulerSvc, node: &str, id: u64, code: i32) -> bool {
+        s.report_completion(Request::new(ReportCompletionRequest {
+            node: node.into(),
+            job_id: id,
+            exit_code: code,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .ok
+    }
+
+    fn schedule(s: &SchedulerSvc) {
+        backfill_pass(
+            &s.fsm,
+            &BackfillPolicy::default(),
+            &PlanApplier::new(),
+            PassOptions::default(),
+        );
+    }
+
+    #[tokio::test]
+    async fn gang_job_flows_through_submit_fetch_and_per_rank_completion() {
+        let s = svc();
+        for n in ["a", "b", "c"] {
+            register(&s, n).await;
+        }
+        let id = submit(&s, 2).await;
+        let pending = job(&s, id).await;
+        assert_eq!(pending.num_nodes, 2);
+        assert!(pending.nodes.is_empty());
+        schedule(&s);
+        let info = job(&s, id).await;
+        assert_eq!(info.state, "RUNNING");
+        assert_eq!(info.nodes.len(), 2, "every node of the gang is listed");
+        let listed = s
+            .list_jobs(Request::new(ListJobsRequest {
+                user: String::new(),
+                state: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.jobs[0].nodes, info.nodes);
+
+        for (rank, node) in info.nodes.iter().enumerate() {
+            let before = gang_ready_of(&s, id).await;
+            assert!(
+                before.active && !before.ready,
+                "rank {rank} not yet fetched"
+            );
+            assert_eq!((before.fetched, before.nodes), (rank as u32, 2));
+            let work = s
+                .fetch_work(Request::new(FetchWorkRequest { node: node.clone() }))
+                .await
+                .unwrap()
+                .into_inner()
+                .assignments;
+            assert_eq!(work.len(), 1);
+            assert_eq!(work[0].rank, rank as u32);
+            assert_eq!(work[0].nodelist, info.nodes);
+            assert_eq!(work[0].job_id, id);
+            assert_eq!(work[0].user, "u");
+        }
+        let open = gang_ready_of(&s, id).await;
+        assert!(open.ready && open.active, "every rank fetched: released");
+        // First rank done: the gang keeps running; a foreign node is refused.
+        assert!(report(&s, &info.nodes[1], id, 0).await);
+        assert_eq!(job(&s, id).await.state, "RUNNING");
+        let outsider = ["a", "b", "c"]
+            .into_iter()
+            .find(|n| !info.nodes.iter().any(|m| m == n))
+            .unwrap();
+        assert!(!report(&s, outsider, id, 0).await);
+        assert!(report(&s, &info.nodes[0], id, 0).await);
+        assert_eq!(job(&s, id).await.state, "COMPLETED");
+        let done = gang_ready_of(&s, id).await;
+        assert!(!done.active && !done.ready, "finished gangs must not start");
+        let ranks = s
+            .fsm
+            .journal()
+            .iter()
+            .filter(|e| matches!(e.event, Event::JobRankFinished { .. }))
+            .count();
+        assert_eq!(ranks, 3);
+    }
+
+    async fn fetch(s: &SchedulerSvc, node: &str) -> FetchWorkReply {
+        s.fetch_work(Request::new(FetchWorkRequest { node: node.into() }))
+            .await
+            .unwrap()
+            .into_inner()
+    }
+
+    async fn cancel(s: &SchedulerSvc, id: u64) -> bool {
+        s.cancel_job(Request::new(CancelJobRequest {
+            job_id: id,
+            user: "u".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .ok
+    }
+
+    struct NoQuorum;
+    impl gnomon_fsm::Proposer for NoQuorum {
+        fn propose(
+            &self,
+            _: Event,
+            _: &[(u32, u64)],
+        ) -> Result<gnomon_fsm::Applied, gnomon_fsm::ProposeError> {
+            Err(gnomon_fsm::ProposeError("no leader".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn writes_without_a_quorum_are_unavailable_not_silently_dropped() {
+        let s = svc();
+        let _ = s.fsm.set_proposer(Arc::new(NoQuorum));
+        let err = s
+            .submit_job(Request::new(SubmitJobRequest {
+                name: "j".into(),
+                user: "u".into(),
+                partition: String::new(),
+                request: None,
+                walltime_secs: 60,
+                priority: 0,
+                command: "true".into(),
+                nodes: 1,
+                container: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        let err = s
+            .register_node(Request::new(RegisterNodeRequest {
+                name: "a".into(),
+                capacity: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert_eq!(s.fsm.index(), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_rank_kills_its_peers_through_fetch_work() {
+        let s = svc();
+        for n in ["a", "b", "c"] {
+            register(&s, n).await;
+        }
+        let id = submit(&s, 3).await;
+        schedule(&s);
+        let nodes = job(&s, id).await.nodes;
+        // Ranks 0 and 1 start; rank 2's agent has not polled yet.
+        for n in &nodes[..2] {
+            assert_eq!(fetch(&s, n).await.assignments.len(), 1);
+        }
+        assert!(report(&s, &nodes[0], id, 7).await);
+        assert_eq!(fetch(&s, &nodes[1]).await.kill, [id]);
+        assert_eq!(fetch(&s, &nodes[1]).await.kill, [id], "until it reports");
+        assert!(fetch(&s, &nodes[0]).await.kill.is_empty());
+        // The unstarted rank is told to die and its queued work is withheld.
+        let late = fetch(&s, &nodes[2]).await;
+        assert!(late.assignments.is_empty());
+        assert_eq!(late.kill, [id]);
+        assert!(report(&s, &nodes[1], id, 143).await);
+        assert!(report(&s, &nodes[2], id, 143).await);
+        assert_eq!(job(&s, id).await.state, "FAILED");
+        for n in &nodes {
+            assert!(fetch(&s, n).await.kill.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_job_kills_it_and_ends_cancelled() {
+        let s = svc();
+        register(&s, "a").await;
+        let id = submit(&s, 1).await;
+        schedule(&s);
+        assert_eq!(fetch(&s, "a").await.assignments.len(), 1);
+        assert!(cancel(&s, id).await);
+        assert_eq!(job(&s, id).await.state, "RUNNING", "until the rank exits");
+        assert_eq!(fetch(&s, "a").await.kill, [id]);
+        assert!(report(&s, "a", id, 143).await);
+        assert_eq!(job(&s, id).await.state, "CANCELLED");
+        assert!(!cancel(&s, id).await, "already finished");
+        assert!(!cancel(&s, 999).await, "unknown job");
+    }
+
+    #[tokio::test]
+    async fn single_node_job_keeps_job_finished_and_lists_its_node() {
+        let s = svc();
+        register(&s, "a").await;
+        let id = submit(&s, 0).await; // 0 = unset on the wire -> 1 node
+        schedule(&s);
+        let info = job(&s, id).await;
+        assert_eq!(info.num_nodes, 1);
+        assert_eq!(info.nodes, vec!["a".to_string()]);
+        let work = s
+            .fetch_work(Request::new(FetchWorkRequest { node: "a".into() }))
+            .await
+            .unwrap()
+            .into_inner()
+            .assignments;
+        assert_eq!(
+            (work[0].rank, work[0].nodelist.clone()),
+            (0, vec!["a".into()])
+        );
+        assert!(report(&s, "a", id, 1).await);
+        assert_eq!(job(&s, id).await.state, "FAILED");
+        let journal = s.fsm.journal();
+        assert!(matches!(
+            journal.last().unwrap().event,
+            Event::JobFinished { code: 1, .. }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod container_tests {
+    use super::*;
+
+    fn svc() -> SchedulerSvc {
+        SchedulerSvc {
+            fsm: Arc::new(Fsm::new()),
+            broker: Arc::new(EvalBroker::new()),
+        }
+    }
+
+    fn submit(container: &str) -> SubmitJobRequest {
+        SubmitJobRequest {
+            name: "c".into(),
+            user: "u".into(),
+            partition: String::new(),
+            request: Some(pb::Resources {
+                cores: 1,
+                mem_mb: 0,
+                gpus: 0,
+            }),
+            walltime_secs: 60,
+            priority: 1,
+            command: "true".into(),
+            nodes: 1,
+            container: container.into(),
+        }
+    }
+
+    async fn submit_id(s: &SchedulerSvc, container: &str) -> u64 {
+        s.submit_job(Request::new(submit(container)))
+            .await
+            .unwrap()
+            .into_inner()
+            .job_id
+    }
+
+    #[tokio::test]
+    async fn container_image_flows_from_submit_to_job_info_and_fetch_work() {
+        let s = svc();
+        let id = submit_id(&s, "alpine:3.20").await;
+        assert_eq!(
+            s.fsm
+                .snapshot()
+                .job(JobId(id))
+                .unwrap()
+                .container
+                .as_deref(),
+            Some("alpine:3.20")
+        );
+        let jobs = s
+            .list_jobs(Request::new(ListJobsRequest::default()))
+            .await
+            .unwrap()
+            .into_inner()
+            .jobs;
+        assert_eq!(jobs[0].container, "alpine:3.20");
+
+        s.register_node(Request::new(RegisterNodeRequest {
+            name: "n0".into(),
+            capacity: Some(pb::Resources {
+                cores: 4,
+                mem_mb: 1024,
+                gpus: 0,
+            }),
+        }))
+        .await
+        .unwrap();
+        let vertex = s.fsm.read(|st| st.graph.by_name("n0").unwrap());
+        s.fsm.apply(Event::JobStarted {
+            job: JobId(id),
+            vertices: vec![vertex],
+            start: gnomon_core::now_secs(),
+            dur: None,
+        });
+        let work = s
+            .fetch_work(Request::new(FetchWorkRequest { node: "n0".into() }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(work.assignments.len(), 1);
+        assert_eq!(work.assignments[0].container, "alpine:3.20");
+        assert_eq!(work.assignments[0].nodelist, vec!["n0".to_string()]);
+        assert_eq!(work.assignments[0].rank, 0);
+    }
+
+    #[tokio::test]
+    async fn empty_container_means_none() {
+        let s = svc();
+        let id = submit_id(&s, "").await;
+        assert_eq!(s.fsm.snapshot().job(JobId(id)).unwrap().container, None);
+    }
+}
+
+#[cfg(test)]
+mod job_info_tests {
+    use super::*;
+    use gnomon_core::ManualClock;
+
+    fn fsm_with_node() -> Fsm {
+        let fsm = Fsm::with_clock(Arc::new(ManualClock::new(1000)));
+        fsm.apply(Event::NodeRegistered {
+            name: "n0".into(),
+            capacity: Resources {
+                cores: 4,
+                mem_mb: 0,
+                gpus: 0,
+            },
+        });
+        let req = Resources {
+            cores: 2,
+            mem_mb: 0,
+            gpus: 0,
+        };
+        let wall = Walltime(Duration::from_secs(600));
+        fsm.apply(Event::JobSubmitted(Job::new(JobId(1), "a", "u", req, wall)));
+        fsm.apply(Event::JobSubmitted(Job::new(JobId(2), "b", "u", req, wall)));
+        fsm
+    }
+
+    #[test]
+    fn job_info_reports_planned_span_and_nodes_once_placed() {
+        let fsm = fsm_with_node();
+        let n0 = fsm.read(|s| s.graph.by_name("n0")).unwrap();
+        fsm.apply(Event::JobStarted {
+            job: JobId(1),
+            vertices: vec![n0],
+            start: 1000,
+            dur: Some(120),
+        });
+        let info = fsm.read(|s| job_info(&s.jobs[&JobId(1)], s.job_nodes(&s.jobs[&JobId(1)])));
+        assert_eq!(info.state, "RUNNING");
+        assert_eq!(info.planned_start, 1000);
+        assert_eq!(info.planned_dur, 120);
+        assert_eq!(info.nodes, vec!["n0".to_string()]);
+    }
+
+    #[test]
+    fn job_info_falls_back_to_walltime_and_no_nodes_while_pending() {
+        let fsm = fsm_with_node();
+        let info = fsm.read(|s| job_info(&s.jobs[&JobId(2)], s.job_nodes(&s.jobs[&JobId(2)])));
+        assert_eq!(info.state, "PENDING");
+        assert_eq!(info.planned_dur, 600);
+        assert!(info.nodes.is_empty());
+    }
+}

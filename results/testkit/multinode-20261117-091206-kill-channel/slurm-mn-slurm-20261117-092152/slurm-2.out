@@ -1,0 +1,5 @@
+srun: error: node1: task 0: Exited with exit code 3
+srun: Terminating StepId=2.0
+srun: error: node3: task 2: Terminated
+srun: error: node2: task 1: Terminated
+srun: Force Terminated StepId=2.0

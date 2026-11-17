@@ -1,0 +1,2 @@
+test=t12 tag=failrank0 jobid=2 event=start t=1794907333 host=node1 cpus=1 nproc=4
+test=t12 tag=failrank0 jobid=2 event=end t=1794907335 code=3

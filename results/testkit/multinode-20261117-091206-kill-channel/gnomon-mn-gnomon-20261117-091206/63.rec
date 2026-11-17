@@ -1,0 +1,2 @@
+test=t09 tag=whole3 jobid=63 event=start t=1794907214 host=node1 cpus=4 nproc=4
+test=t09 tag=whole3 jobid=63 event=end t=1794907244 code=0

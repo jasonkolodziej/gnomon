@@ -1,0 +1,2 @@
+test=t03 tag=C-short jobid=4 event=start t=1794905801 host=node2 cpus=1 nproc=4
+test=t03 tag=C-short jobid=4 event=end t=1794905831 code=0

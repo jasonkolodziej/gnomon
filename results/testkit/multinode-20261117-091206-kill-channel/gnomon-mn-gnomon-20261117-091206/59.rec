@@ -1,0 +1,2 @@
+test=t07 tag=exit3 jobid=59 event=start t=1794907195 host=node3 cpus=1 nproc=4
+test=t07 tag=exit3 jobid=59 event=end t=1794907197 code=3

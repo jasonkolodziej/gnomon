@@ -1,0 +1,2 @@
+test=t02 tag=cpus4 jobid=1 event=start t=1794906736 host=node2 cpus=4 nproc=4
+test=t02 tag=cpus4 jobid=1 event=end t=1794906741 code=0

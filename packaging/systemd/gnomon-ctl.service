@@ -1,0 +1,34 @@
+# Gnomon controller. Install to /etc/systemd/system/ (see docs/INSTALL.md).
+# Settings live in /etc/gnomon/gnomon-ctl.env (GNOMON_LISTEN, GNOMON_RAFT_ID, GNOMON_RAFT_PEERS, ...).
+[Unit]
+Description=Gnomon controller
+Documentation=https://github.com/jasonkolodziej/gnomon/blob/main/docs/INSTALL.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gnomon
+Group=gnomon
+StateDirectory=gnomon
+Environment=GNOMON_STATE_DIR=/var/lib/gnomon
+EnvironmentFile=-/etc/gnomon/gnomon-ctl.env
+ExecStart=/usr/local/bin/gnomon-ctl
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+# Hardening: the controller only needs its state directory and the network.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

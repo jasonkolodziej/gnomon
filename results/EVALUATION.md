@@ -1,0 +1,459 @@
+# Gnomon — evaluation of the concurrency fix and three new mechanisms
+
+All numbers on this page are produced by code in this repository and can be regenerated
+(see *Reproduce* at the end). Machine: 2-core sandbox; timings are relative, not absolute.
+
+## Decision summary
+
+| Change | Verdict | Default | Evidence |
+|---|---|---|---|
+| **Per-vertex optimistic concurrency** (+ three correctness fixes) | **Keep** | On | 92–100% fewer conflicts, 1.15–1.99× controller throughput (§1) |
+| **Exact replay, counterfactuals and shadow mode** (`gnomon-sim`) | **Keep** | Tooling | Bit-identical replay; same policy reproduces all 5,000 start times; shadowing changes nothing live (§2, §5) |
+| **Distribution-aware backfill** (runtime quantiles + risk budget) | **Keep, opt-in** | Off | Mechanism is safe and the oracle shows 16% lower waits / 29% lower slowdown, but the built-in per-user predictor is inconsistent and slows wide jobs (§3) |
+| **Bias-corrected runtime prediction** (pinball-loss bias correction + reservation protection) | **Keep, opt-in** | Off | Lower mean wait in 9/9 windows (median −10%), −20% bounded slowdown, −13% p95 wait; median wide-job wait −3% but worse in 4/9 windows (up to +37%), so not a win on every criterion (§3b) |
+| **Multi-node gang jobs** (+ snapshot-cost fix) | **Keep** | On (`-N` defaults to 1) | Oracle-tested gang matching; default-policy schedules unchanged; controller throughput 0.92–0.96× of `main` after fixing a 0.55× regression (§7) |
+| **Time-varying capacity** (power caps, carbon windows) | **Keep, opt-in per node** | Off | Zero cap violations with 85% / 67% lower median wait than static derating, and no job made unrunnable (§4) |
+
+Everything stays. Runtime predictors ship off by default. The per-user quantile predictor (§3) is
+not better than planning with the user's walltime. The bias-corrected predictor (§3b) beats it on
+mean wait in all 9 windows, but wide jobs still wait longer in 4 of them. The planner mechanism they
+plug into is kept because the oracle bound shows the head-room is real and the replay tooling makes
+better predictors cheap to evaluate.
+
+## 1. Per-vertex optimistic concurrency
+
+**Problem found.** The plan applier rejected a plan if *any* event — including a node heartbeat — had
+been applied since the plan's snapshot (`fsm.index() != plan.base_index`). Two further bugs sat in the
+same path: a plan the resource graph rejected at commit time was still counted as committed and never
+re-enqueued (the job stayed Pending forever), and nothing stopped the same job being placed twice by
+two workers.
+
+**Fix.** Every resource-graph vertex carries a version, bumped on each planner mutation. A plan records
+the versions of the vertices it uses (its *read set*). At commit: if those vertices are unchanged the
+plan is valid by construction and is inserted without re-checking (fast path); otherwise capacity is
+revalidated and the plan is rejected only if it no longer fits. The state machine now refuses to place
+a job that is not Pending and reports acceptance back to the applier.
+
+**Measurement** (`cargo run --release -p gnomon-sched --bin occ_bench`): the real controller loop —
+broker → snapshot → plan → applier, re-enqueue on conflict — with 256 nodes, 2,048 jobs and a
+background thread sending heartbeats.
+
+| workers | heartbeats/s | conflicts before → after | throughput before → after (jobs/s) | speedup |
+|---|---|---|---|---|
+| 1 | 0 | 0 → 0 | 1,750 → 2,248 | 1.28× |
+| 2 | 0 | 1,210 → 2 | 2,073 → 2,825 | 1.36× |
+| 4 | 0 | 1,096 → 56 | 2,083 → 3,039 | 1.46× |
+| 1 | 100 | 45 → 0 | 1,893 → 2,172 | 1.15× |
+| 2 | 100 | 1,047 → 4 | 2,231 → 3,094 | 1.39× |
+| 4 | 100 | 1,167 → 94 | 1,695 → 2,327 | 1.37× |
+| 1 | 1000 | 499 → 0 | 1,404 → 1,825 | 1.30× |
+| 2 | 1000 | 1,440 → 4 | 1,586 → 3,151 | 1.99× |
+| 4 | 1000 | 1,333 → 50 | 1,848 → 3,112 | 1.68× |
+
+![OCC fix](figures/fig_occ_fix.png)
+
+## 2. Exact replay and counterfactual evaluation
+
+The state machine now takes an injected clock and can journal every event with the time it was applied.
+Scheduling decisions are pure functions of (graph, job, now). Together that makes the production
+scheduler replayable:
+
+- `replay::verify_exact` / `rebuild` — re-apply a journal and get bit-identical state.
+- `replay::workload_from_journal` — recover what was submitted and how long each job really ran, then
+  re-schedule that history under a different policy with the real code (a counterfactual), instead of
+  a separately maintained simulator.
+
+E0 on 5,000 jobs of the SDSC-SP2 trace:
+
+| check | result |
+|---|---|
+| journal events | 132421 (12658 KiB JSONL) |
+| JSONL round-trip lossless | true |
+| replayed state identical | true |
+| recovered history, same policy → identical start times (5000 jobs) | true |
+| simulate 5000 jobs / rebuild from journal | 979 ms / 403 ms |
+
+## 3. Distribution-aware backfill
+
+Each span in a vertex planner can be planned at a *predicted* length instead of the user's walltime.
+`QuantileEstimator` learns each user's runtime/walltime ratio from completed jobs and plans at the θ
+quantile (risk budget 1 − θ). A job that outlives its planned span is extended, never killed early —
+the walltime is still the hard limit — and the next pass re-plans the reservations behind it. Tests
+show the machine is never oversubscribed even when predictions are badly wrong (θ = 0.3).
+
+Evaluated on 9 windows of 5,000 consecutive jobs from three Parallel Workloads Archive traces
+(SDSC-SP2, CTC-SP2, HPC2N), conservative backfill with up to 32 reservations per pass, FCFS order,
+predictors warm-started on the preceding 2,000 jobs. Changes are relative to walltime planning in the
+same window.
+
+| planning | risk budget | Δ mean wait, median (range) | Δ bounded slowdown | Δ p95 wait | Δ wide-job wait | windows better on wait | overrun extensions / job |
+|---|---|---|---|---|---|---|---|
+| q0.50 | 50% | -8.6% (-19…+72) | -8.9% | -5.4% | +10.4% | 6/9 | 0.58 |
+| q0.70 | 30% | -2.6% (-15…+21) | -8.7% | -3.1% | +8.1% | 6/9 | 0.32 |
+| q0.90 | 10% | +0.2% (-13…+13) | -1.8% | +1.5% | +0.0% | 4/9 | 0.12 |
+| q0.95 | 5% | -2.3% (-12…+19) | -0.5% | +0.2% | +0.0% | 6/9 | 0.07 |
+| oracle | — | -15.7% (-25…-2) | -29.4% | -12.9% | -11.4% | 9/9 | 0.00 |
+
+![Runtime quantiles](figures/fig_runtime_quantiles.png)
+
+**Reading.** Perfect knowledge (oracle) improves every window: 16% lower mean wait, 29% lower bounded
+slowdown, and wide jobs wait 11% less. The learned per-user quantile captures only a fraction of that,
+with a wide spread (−15% to +21% mean wait at θ = 0.7) and longer waits for wide jobs (+8%), because
+under-predicted spans let reservations for large jobs slip. This matches the literature: Tsafrir et
+al. and later studies find that prediction accuracy alone does not determine schedule quality, and that
+estimation *bias* matters more than regression accuracy. Hence: mechanism kept, predictor opt-in
+(`BackfillPolicy::with_estimator`), walltime remains the default. Better predictors (e.g. job-name or
+script features, bias calibration, or protecting reservations of wide jobs) can now be scored with E1
+in minutes; §3b does exactly that.
+
+Per-window baseline and selected variants:
+
+| trace | window offset | walltime: mean wait (h) | bsld | utilization | q0.70 wait | oracle wait |
+|---|---|---|---|---|---|---|
+| SDSC-SP2 | 10000 | 3.35 | 41.2 | 69.2% | 3.14 | 3.00 |
+| SDSC-SP2 | 20000 | 4.33 | 67.0 | 79.3% | 5.04 | 3.42 |
+| SDSC-SP2 | 30000 | 5.34 | 87.7 | 85.2% | 4.74 | 4.36 |
+| CTC-SP2 | 10000 | 3.22 | 45.0 | 82.3% | 2.74 | 2.72 |
+| CTC-SP2 | 20000 | 4.72 | 52.6 | 84.1% | 5.09 | 3.84 |
+| CTC-SP2 | 30000 | 3.14 | 23.7 | 81.2% | 3.79 | 2.36 |
+| HPC2N-2002 | 10000 | 1.70 | 44.5 | 59.4% | 1.66 | 1.66 |
+| HPC2N-2002 | 20000 | 1.65 | 39.5 | 61.5% | 1.58 | 1.57 |
+| HPC2N-2002 | 30000 | 1.13 | 32.8 | 58.5% | 1.12 | 1.08 |
+
+## 3b. Bias-corrected runtime prediction
+
+`BiasCorrectedEstimator` (`crates/sched/src/bias.rs`) replaces the per-user ratio quantile of §3 with
+three parts:
+
+1. **Base prediction.** An exponentially weighted mean of ln(runtime / walltime) over a feature
+   hierarchy (global → requested-walltime bucket → walltime × cores bucket → user → user × walltime
+   bucket), each level shrunk toward its parent. The job name is not used (it is `swf` in the traces).
+2. **Bias correction with an asymmetric loss.** An online quantile tracker on the signed log-error of
+   the base prediction, per user and shrunk toward a global tracker. Its update is the gradient of the
+   pinball loss at level τ, so an under-prediction costs τ/(1−τ) times an over-prediction and the share
+   of overrunning jobs converges to 1−τ (unit test: 80.0% coverage at τ = 0.8 on a stream whose
+   geometric mean under-predicts). A second tracker at τ = 0.9 gives a *cautious* span.
+3. **Reservation protection.** A job starts on its τ = 0.7 span but is recorded at its cautious span
+   when that also fits, so later reservations rest on a cautious estimate. A job that outlives its
+   prediction is re-planned to its walltime, not doubled. Once the reservation of a wide job
+   (≥ 25% of the largest node) moves later, which walltime planning never does, new starts must fit
+   at their cautious span and are recorded at walltime until that job has started. The policy sees the
+   queue through a new `Policy::begin_pass` hook; `RuntimeEstimator::spans_on` returns the predicted,
+   guard and recorded spans. `QuantileEstimator`, `BackfillPolicy::with_estimator` and every §3 row are
+   unchanged (identical numbers in the regenerated CSV).
+
+Same 9 windows and protocol as §3 (warm start on the preceding 2,000 jobs). Raw output:
+`e1b_bias_corrected.csv`. "Wide better" counts windows where wide jobs wait less than under walltime
+planning.
+
+| planning | Δ mean wait, median (range) | Δ bounded slowdown | Δ p95 wait | Δ wide-job wait (worst window) | windows better on wait | wide better | overrun extensions / job |
+|---|---|---|---|---|---|---|---|
+| walltime | — | — | — | — | — | — | 0.00 |
+| q0.70 (§3) | -2.6% (-15…+21) | -8.7% | -3.1% | +8.1% (+35) | 6/9 | 2/9 | 0.32 |
+| **bc0.70-r0.90-p** (selected) | **-10.0% (-32…-5)** | **-20.0%** | **-13.5%** | **-2.7% (+37)** | **9/9** | **5/9** | 0.09 |
+| bc0.70-r0.90 (no slip protection) | -10.7% (-38…+0) | -20.8% | -12.0% | +11.7% (+82) | 8/9 | 2/9 | 0.13 |
+| bc0.70 (bias correction only) | -10.6% (-40…-1) | -11.1% | -6.4% | +8.4% (+47) | 9/9 | 2/9 | 0.25 |
+| bc0.70-b0.90-p (cautious span blocks instead of recorded) | -8.4% (-36…-1) | -20.4% | -13.6% | +4.0% (+29) | 9/9 | 4/9 | 0.16 |
+| bc0.70-r0.90-w0.25-p (wide jobs at walltime) | -11.1% (-29…-1) | -20.0% | -9.0% | +7.0% (+41) | 9/9 | 2/9 | 0.09 |
+| bc0.50-r0.90-p | -14.3% (-39…-7) | -15.3% | -9.1% | +1.5% (+35) | 9/9 | 4/9 | 0.10 |
+| oracle | -15.7% (-25…-2) | -29.4% | -12.9% | -11.4% (-4) | 9/9 | 9/9 | 0.00 |
+
+Per window, mean wait and wide-job wait in hours:
+
+| trace | window offset | walltime wait | q0.70 wait | bc wait | oracle wait | walltime wide | q0.70 wide | bc wide | oracle wide |
+|---|---|---|---|---|---|---|---|---|---|
+| SDSC-SP2 | 10000 | 3.35 | 3.14 | 3.14 | 3.00 | 6.46 | 6.23 | 6.14 | 5.87 |
+| SDSC-SP2 | 20000 | 4.33 | 5.04 | 3.37 | 3.42 | 13.59 | 17.18 | 11.41 | 10.17 |
+| SDSC-SP2 | 30000 | 5.34 | 4.74 | 4.81 | 4.36 | 15.12 | 14.31 | 12.97 | 12.28 |
+| CTC-SP2 | 10000 | 3.22 | 2.74 | 2.19 | 2.72 | 10.34 | 11.87 | 10.40 | 9.70 |
+| CTC-SP2 | 20000 | 4.72 | 5.09 | 3.29 | 3.84 | 19.54 | 22.11 | 19.00 | 13.83 |
+| CTC-SP2 | 30000 | 3.14 | 3.79 | 2.95 | 2.36 | 13.73 | 18.47 | 17.21 | 10.11 |
+| HPC2N-2002 | 10000 | 1.70 | 1.66 | 1.49 | 1.66 | 2.02 | 2.18 | 1.66 | 1.95 |
+| HPC2N-2002 | 20000 | 1.65 | 1.58 | 1.56 | 1.57 | 1.95 | 2.08 | 2.68 | 1.73 |
+| HPC2N-2002 | 30000 | 1.13 | 1.12 | 1.04 | 1.08 | 2.16 | 2.27 | 2.31 | 2.03 |
+
+**Reading.** Bias correction is what turns the predictor from inconsistent into a consistent win: the
+selected variant lowers mean wait in all 9 windows (median −10%, against −2.6% and 6/9 for q0.70),
+and cuts bounded slowdown by 20% and p95 wait by 13% (p95 wait is lower in all 9 windows), about two thirds of the oracle's head-room on
+wait and slowdown. Overruns drop from 0.32 to 0.09 extensions per job. (FCFS backfill is a heuristic,
+so a predictor can beat the oracle in a single window, as in CTC 10000/20000.)
+
+Wide jobs are only partly protected. The ablations show where their extra wait came from. Planning the
+wide jobs themselves at walltime makes them wait *longer* (+7%): it pushes the reservation of the
+next wide job out and lets long narrow jobs fill the gap. Blocking narrow jobs whose cautious span
+does not fit in front of a reservation helps less than recording that span. What matters most is that
+a reservation, once made, does not slip: without slip protection wide jobs wait +12% (worst window
++82%). With it the median wide-job wait is 2.7% *below* walltime planning, but only in 5 of 9 windows:
+CTC 30000 (+25%) and HPC2N 20000 (+37%, on a 2-hour base) remain clearly worse. The result is also
+sensitive to the planning levels: during tuning, τ = 0.6 / 0.8 or a cautious level of 0.85 / 0.95 gave
+the same 8–9/9 wait wins but a median wide-job change of +1% to +13%, so the −2.7% sits in a noisy
+region, not a robust optimum. On the 9 windows the selected variant meets the stated target (lower
+mean wait in most windows, median wide-job wait not worse) but not "wide jobs never worse".
+
+**Decision.** Keep `BiasCorrectedEstimator` as the recommended predictor, **opt-in**
+(`BackfillPolicy::with_estimator(.., Arc::new(BiasCorrectedEstimator::new(BiasConfig::default())))`);
+walltime planning stays the default because the predictor does not win on every criterion in every
+window (wide jobs wait longer in 4/9 windows, bounded slowdown is 2–6% higher in two SDSC-SP2 windows).
+The wide-job shield below removes the wide-job regression at the cost of part of the wait gain.
+
+### Wide-job shield: a predictor that never pushes back a wide reservation
+
+`WideSafeBackfill` (`crates/sched/src/bias.rs`, opt-in) wraps the predictor policy. Slip protection
+reacts once a wide reservation has moved; the shield prevents the move. Next to the optimistic plan
+the predictor works on, it keeps a conservative view of the machine:
+
+- every running job occupies the view until `start + walltime`, which bounds its real end;
+- each queued wide job holds a **protected slot** for its walltime span: its earliest fit in the
+  view after the higher-priority queued jobs. Slots are re-placed each pass one at a time, and a slot
+  only moves earlier;
+- every start, whatever the predictor says, is **admitted** only if the job's *walltime* span fits
+  now in the view next to every protected slot (a wide job's own slot excluded). The admitted job is
+  then booked in the view at walltime. In the pass where a wide job's slot comes due, the shield
+  starts it even if the optimistic plan would not, and defers the reservations ahead of it in that
+  pass. A refused narrow job is reserved where its walltime span would be admitted.
+
+The predictor still decides everything else: which narrow jobs backfill in front of *narrow*
+reservations, the planned spans of running jobs, and where narrow jobs are reserved.
+
+**Guarantee (no-slip).** Assume jobs end by their walltime (the simulator and real resource
+managers enforce it) and a pass runs at every arrival and completion. Then a wide job that holds a
+slot starting at `s` starts at or before `s`, and its slot never moves later. Sketch: everything in
+the view bounds real occupancy from above, the slots fit together with it, and nothing starts without
+fitting around them. Let `t0 ≤ s` be the last pass before `s`. No job ends in `(t0, s]` (that would be
+a pass) and, by induction on slot starts, no other unstarted slot begins there, so the slot's room is
+already free at `t0` and the job is admitted then. Unit tests in `bias.rs` check this on a
+hand-built case (an overrunning backfill that delays the wide job under the plain predictor is
+refused, and the wide job starts exactly at its slot) and on 8 random event-driven workloads (no slot
+ever moves later, no wide job starts after its slot). The shield counts late starts: 0 in all 36
+shielded E1 runs.
+
+**What no policy can guarantee.** "Wide jobs never wait longer than under walltime planning" cannot
+hold for every workload unless the policy *is* walltime planning. Take the first moment a policy
+starts a job that walltime backfill would not start then (or holds back one it would start). Its
+schedule differs from then on. An adversary can then submit a wide job that fits exactly the room the
+walltime schedule has at that instant and the other schedule does not. That job alone makes the
+wide-job mean worse. The shield covers the part prediction controls: once a wide job holds a slot,
+prediction errors cannot delay it. Its *first* slot comes from the state the predictor produced, and
+wide jobs beyond the reservation depth (32) get no slot until they reach it. In HPC2N 20000 with
+walltime-placed slots, four 64-core, 5-minute jobs started 199 min later than under walltime planning,
+with no slot violated. That one divergence accounts for the whole +22% in that window.
+
+**Where a new slot goes** (`NarrowAhead`) is the one design choice; the guarantee holds for all of
+them. Higher-priority narrow jobs are planned ahead of the wide job at their walltime (the slot is
+the reservation walltime planning would give from the current state), at their predicted span (the
+slot is where the predictor's own plan would put the wide job if running jobs ran to walltime), or not
+at all (wide jobs first). Rows from `e1b_bias_corrected.csv`, columns as in the table above (wide
+column: median change, best window in brackets when all windows improve, else worst):
+
+| planning | Δ mean wait, median (range) | Δ bounded slowdown | Δ p95 wait | Δ wide-job wait | windows better on wait | wide better | overrun extensions / job |
+|---|---|---|---|---|---|---|---|
+| bc0.70-r0.90-p (§3b selected, unshielded) | -10.0% (-32…-5) | -20.0% | -13.5% | -2.7% (worst +37) | 9/9 | 5/9 | 0.09 |
+| **bc0.70-r0.90-p-ws.plan** (selected) | **-5.1% (-14…+1)** | **-7.6%** | **-5.1%** | **-18.1% (worst -10)** | **8/9** | **9/9** | 0.09 |
+| bc0.70-r0.90-p-ws.wall (slots at walltime planning's reservation) | -5.6% (-25…-1) | -16.6% | -5.1% | -1.7% (worst +22) | 9/9 | 5/9 | 0.09 |
+| bc0.70-r0.90-p-ws.first (wide jobs first) | -3.2% (-13…+7) | -9.4% | -3.3% | -44.6% (worst -16) | 6/9 | 9/9 | 0.10 |
+| bc0.70-r0.90-ws.plan (no slip protection) | -7.1% (-17…+9) | -9.9% | -5.1% | -11.2% (worst +9) | 7/9 | 8/9 | 0.12 |
+
+Per window, hours (bc = unshielded bc0.70-r0.90-p, ws = bc0.70-r0.90-p-ws.plan):
+
+| trace | window offset | walltime wait | bc wait | ws wait | walltime wide | bc wide | ws wide |
+|---|---|---|---|---|---|---|---|
+| SDSC-SP2 | 10000 | 3.35 | 3.14 | 3.39 | 6.46 | 6.14 | 5.70 |
+| SDSC-SP2 | 20000 | 4.33 | 3.37 | 4.11 | 13.59 | 11.41 | 9.82 |
+| SDSC-SP2 | 30000 | 5.34 | 4.81 | 5.14 | 15.12 | 12.97 | 11.60 |
+| CTC-SP2 | 10000 | 3.22 | 2.19 | 3.00 | 10.34 | 10.40 | 9.24 |
+| CTC-SP2 | 20000 | 4.72 | 3.29 | 4.60 | 19.54 | 19.00 | 15.73 |
+| CTC-SP2 | 30000 | 3.14 | 2.95 | 2.71 | 13.73 | 17.21 | 11.03 |
+| HPC2N-2002 | 10000 | 1.70 | 1.49 | 1.57 | 2.02 | 1.66 | 1.65 |
+| HPC2N-2002 | 20000 | 1.65 | 1.56 | 1.57 | 1.95 | 2.68 | 1.75 |
+| HPC2N-2002 | 30000 | 1.13 | 1.04 | 1.06 | 2.16 | 2.31 | 1.94 |
+
+**Out-of-sample check.** `NarrowAhead` was chosen on these 9 windows, so we also ran 12 windows not
+used for any choice (offsets 5000, 15000, 25000 and 35000, same protocol; HPC2N 25000 has no wide
+jobs). Wide jobs wait less than under walltime planning in 11/11 windows with ws.plan, against 6/11
+for the unshielded predictor (CTC 5000 +68%, 25000 +36%, 15000 +17%, 35000 +2%; HPC2N 35000 +45%).
+Mean wait is lower in 9/12 windows with ws.plan (SDSC 5000 +1.8%, SDSC 35000 +5.8%, CTC 5000 +2.4%)
+and in 12/12 with the unshielded predictor.
+
+**Reading.** The shield turns "wide jobs worse in 4/9 windows" into 0/9, and the margin is not
+knife-edge: −10% in the worst window, 0/11 out of sample. It gives up about half of the mean-wait
+gain (median −5.1% against −10.0%; mean of the per-window changes −5.6% against −14.7%) and most of
+the slowdown gain (−7.6% against −20%). Mean wait is 1.1% above walltime planning in SDSC 10000. The
+wait the shield takes from narrow jobs largely goes to wide ones. Placing slots at walltime
+planning's reservation keeps more of the wait gain but still loses on wide jobs in 4/9 windows, which
+shows how the remaining regression arises: a slot made from the predictor's state is protected, but it
+can be later than the walltime policy's reservation in its own state. Planning wide jobs first gives
+them large gains and costs mean wait in 3/9 windows. Slip protection still helps under the shield
+(without it: wide worse in 1/9, mean worse in 2/9).
+
+**Decision.** For sites that must not regress on wide jobs, use
+`WideSafeBackfill::new(window, Arc::new(BiasCorrectedEstimator::new(BiasConfig::default())))` (opt-in;
+the default policy and the replay gate are unchanged). Otherwise use the unshielded predictor, which
+has the larger mean-wait gain.
+
+## 4. Time-varying capacity
+
+A vertex can carry a `CapacityProfile` — piecewise-constant capacity that may repeat daily. The planner
+sweep treats profile breakpoints like span edges, so placement and backfill respect it natively, and it
+is set through a replicated `NodeProfileSet` event. Scenarios on the same 9 windows: a demand-response
+power cap (60% of cores 16:00–20:00 UTC daily) and a carbon window (75% of cores during the six
+highest-intensity hours of a stylised duck-curve grid, 10 W/core). Three ways to run a machine under the
+cap are compared: ignore it, derate the machine to the cap all day (the time-blind way to comply), or
+let Gnomon's planner see the profile.
+
+| scenario | planner | median mean wait (h) | median bsld | core-hours above cap (9 windows) | jobs never run | kg CO₂ (9 windows) |
+|---|---|---|---|---|---|---|
+| Power cap 60%, 16:00–20:00 | ignores cap | 3.22 | 44.5 | 66,971 | 0 | 4,862 |
+| Power cap 60%, 16:00–20:00 | static derate all day | 44.27 | 766.0 | 0 | 213 | 4,614 |
+| Power cap 60%, 16:00–20:00 | Gnomon time-varying | 6.78 | 95.5 | 0 | 0 | 4,917 |
+| Carbon window 75%, 17:00–23:00 | ignores cap | 3.22 | 44.5 | 54,835 | 0 | 4,862 |
+| Carbon window 75%, 17:00–23:00 | static derate all day | 13.31 | 193.7 | 0 | 153 | 4,672 |
+| Carbon window 75%, 17:00–23:00 | Gnomon time-varying | 4.45 | 63.0 | 0 | 0 | 4,776 |
+
+![Capacity profiles](figures/fig_capacity_profiles.png)
+
+**Reading.** The time-varying planner is fully compliant at a fraction of the cost of static derating
+(median wait −85% under the power cap, −67% under the carbon window) and still runs every job; static
+derating makes the widest jobs impossible to run (its lower CO₂ total is because those jobs never ran).
+As a *carbon* lever a blunt capacity cap is weak (−1.8% CO₂ vs ignoring it, and the power cap shifts work
+into dirtier evening hours, +1.1%). Real carbon savings need deferrable job classes and congestion-aware
+start-time coordination (COAST); the capacity profile is the mechanism those policies can build on.
+
+## 5. Shadow mode
+
+`ShadowPolicy` wraps the live policy, computes a candidate's decision against the same graph and time
+for every placement, applies only the live decision and records disagreements (placement only: action,
+start time and vertices).
+
+| measure | value |
+|---|---|
+| decisions compared | 211806 |
+| agreement | 93.6% |
+| candidate would start a job the live policy deferred/reserved | 6709 |
+| live schedule unchanged by shadowing | true |
+
+## 6. Planner rewrite and the original benchmark
+
+The per-vertex planner's `earliest_fit` was rewritten from an O(S³) rescan into a single sweep over a
+usage step-function (O(S log S) in the number of spans), validated against a brute-force oracle on 400
+random cases including periodic capacity profiles. Spans now carry their job, so completion releases the
+rest of a reserved window. Re-running the original planning benchmark (`bench_results.csv`): the serial
+baseline got 1.5–9.7× faster and the parallel core 1.0–3.8× faster. As a result the serial loop now beats
+the parallel path on small bursts (≤1,024 jobs), where the parallel path's snapshot copy and thread
+start-up dominate sub-millisecond runs; the parallel core still wins by 1.5–1.6× at 4,096–8,192 jobs.
+
+## 7. Future-work iteration: gangs, durability, runtime confinement, verification
+
+(Status as of PR #2; the next iteration is §8.)
+
+Measured on a 4-vCPU cloud VM (not the 2-core sandbox of §1–§6), after integrating every item.
+Raw data: `bench-2026-11/`, `replay_baseline.json`, `testkit/`.
+
+**Schedules are unchanged where they should be.** The replay gate (`replay_gate`) gives identical
+metrics before and after gangs, durable state, the agent runtime and `gntop` for the default policy,
+on two synthetic machines and the three SWF windows, with exact replay everywhere. Re-running
+`experiments` reproduces `e1_runtime_quantiles.csv`, `e1b_bias_corrected.csv` and
+`e2_capacity_profiles.csv` exactly (E0 journals grow ~1% from the new `nodes`/`container` fields).
+
+**A throughput regression, caught by the benchmarks and fixed.** Gang support first cut
+controller-path throughput (`occ_bench`, summed over all 18 rows) to **0.55×** of `main`: every
+placement copied the job's node names into a per-job map and into each rank's assignment, and the
+FSM deep-clones state for every scheduling evaluation. Sharing one `Arc<[String]>` per job still
+left ~20%: concurrent snapshot threads contended on the atomic reference counts (`Job` clone/drop
+rose from 2% to 21% of the profile). The fix records a placed job's rank-0 vertex as a plain integer
+and keeps a shared node list only for gangs, so single-node jobs add no heap or atomic work per
+snapshot. Interleaved A/B runs against `main` on the same host: **0.92–0.96×**, within run-to-run
+noise. CI now runs this A/B on every pull request and fails below 0.85×
+(`.github/scripts/occ_ab.py`).
+
+Per-vertex OCC on this host (`bench-2026-11/occ_conflicts.csv`):
+
+| workers | heartbeats/s | conflicts GlobalIndex → PerVertex | jobs/s GlobalIndex → PerVertex | speedup |
+|---|---|---|---|---|
+| 1 | 0 | 0 → 0 | 1,776 → 1,903 | 1.07× |
+| 2 | 0 | 1,078 → 0 | 1,927 → 2,749 | 1.43× |
+| 4 | 0 | 1,059 → 24 | 3,507 → 4,285 | 1.22× |
+| 1 | 100 | 34 → 0 | 1,775 → 1,781 | 1.00× |
+| 2 | 100 | 1,011 → 7 | 1,994 → 2,813 | 1.41× |
+| 4 | 100 | 828 → 12 | 3,501 → 4,121 | 1.18× |
+| 1 | 1000 | 613 → 0 | 1,431 → 1,758 | 1.23× |
+| 2 | 1000 | 991 → 3 | 1,916 → 2,783 | 1.45× |
+| 4 | 1000 | 1,130 → 20 | 3,391 → 4,708 | 1.39× |
+
+The §1 conclusion holds: 97–100% fewer conflicts and up to 1.45× throughput; single-worker runs
+without heartbeats are roughly a wash, as expected (nothing to conflict with). Planning core
+(`bench-2026-11/bench_results.csv`): the parallel path wins at 4,096–8,192 jobs (1.4×) and the serial
+loop at ≤1,024, as in §6.
+
+**Gang jobs in the replay gate.** `synthetic/cluster-16x16-gangs` (16 × 16-core nodes, every 7th of
+2,000 jobs a 2–8 node gang, ~77% utilization): mean wait 1.75 h, wide-job wait 4.5 h, exact replay;
+it is now part of the committed baseline, so a change that slows gangs fails CI.
+
+**Gnomon vs Slurm, same host.** The seven-test kit at full length against Gnomon and a single-node
+Slurm 23.11 (`testkit/slurm-local.sh`): both pass 7/7. Backfill behaves identically (the short job
+is backfilled ~235 s ahead of the wide one, the long job held behind it); on a 50-job burst Gnomon
+submits at 120 vs 43 jobs/s and drains in 27 vs 37 s. Details and caveats:
+[`testkit/COMPARISON.md`](testkit/COMPARISON.md). A one-node Slurm is not a production cluster;
+multi-node placement and scale remain to be compared on real hardware.
+
+| Future-work item | Status | Evidence |
+|---|---|---|
+| Bias-correcting runtime predictor protecting wide jobs | Built, opt-in | §3b: −10% mean wait (9/9 windows), wide jobs still worse in 4/9 |
+| Persistent Raft · cgroup confinement | Built | Durable `DiskStore` + controller `--state-dir` with restart tests; cgroup v2 limits tested on a fake cgroupfs (this host is cgroup v1) |
+| Multi-node gang jobs | Built, on | Oracle-tested `match_gang`; mixed 16-node simulation; replay gate scenario |
+| Rootless containers · live Gantt TUI (`gntop`) | Built | Docker/Podman argv and kill tested with a fake runtime; `gntop` render tests + live `--once` |
+| Same test suite side by side with Slurm | Single-node Slurm, CI weekly | 7/7 on both; a multi-node cluster comparison is still open |
+| Every change measured with the replay harness | CI gate on every PR | Replay gate + throughput A/B + 80% coverage floor |
+
+The open items of this table are closed in §8.
+
+## 8. Next iteration: replication, kill channel, wide-job shield, real hosts, multi-node Slurm
+
+Same 4-vCPU cloud VM as §7. The default policy's schedules are unchanged: the replay gate matches
+`replay_baseline.json` on all six scenarios with exact replay, after every item below. The
+controller-path throughput A/B against `main` (`occ_bench`, 3 interleaved runs) gives **1.20×**,
+within run-to-run noise (CI floor 0.85×).
+
+| Item | Status | Evidence |
+|---|---|---|
+| Raft network layer and multi-node controller replication | Built, opt-in (`--raft-id/--raft-peers`) | TCP transport; every FSM write committed through `client_write` via a `Proposer` hook (ADR 0001); followers forward writes and read their own; plan read sets in the log. Tests: 3 replicas over TCP converge, survive SIGKILL of the leader, a restarted replica catches up byte-identically, a minority refuses writes. Live: 3 controllers + 3 agents, the leader and (separately) the agents' controller SIGKILLed mid-job, every job completed |
+| Predictor that never slows wide jobs | Built, opt-in (wide-job shield, `ws.plan`) | §3b: wide jobs wait less than under walltime planning in **9/9** windows (median −18%, worst −10%; was worse in 4/9). Mean wait median −5.1% (was −10.0%), better in 8/9. No-slip guarantee proven and property-tested, 0 late starts in 36 runs. A strict per-workload "never worse than the baseline" bound is impossible (§3b) |
+| Validate cgroup v2 limits and containers on real hosts | Built; 11/11 on real cgroup v2 hosts (CI) | `testkit/validate-host.sh`, `host-validation.yml` (Ubuntu 24.04, Docker and Podman): all 5 cgroup checks (limits from inside the job, OOM within `memory.max`, CPU cap, `cgroup.kill` of `setsid` escapees, walltime) and 6 container checks pass with both runtimes. Containers also 6/6 against Docker 29 on this cgroup v1 VM. The first CI run caught a real bug: rootful Podman rejects `--userns=keep-id`, now passed only for a non-root agent |
+| Cancel a gang's peers when one rank fails (agent kill channel) | Built, on | Replicated per-node kill list delivered with `FetchWork`; also cancels running jobs. Unit, API and launch tests; replay exact. Live 3-node gang: FAILED within one agent poll instead of 120 s. Multi-node kit t12: 8 s submit-to-FAILED on both Gnomon and Slurm. Also fixed: unconfined kills now reach grandchildren (process group) |
+| Side by side on a real multi-node Slurm cluster | Built; 3 container nodes on one VM, CI weekly | `testkit/multinode.sh`: Slurm 23.11 (slurmctld + 3 slurmd) and Gnomon (controller + 3 agents) on identical containers. t01–t10 and t12 PASS on both; gang rank start spread 94–134 ms (Gnomon) vs 4–5 ms (Slurm `srun`); Gnomon spreads small jobs, Slurm packs ([`testkit/COMPARISON.md`](testkit/COMPARISON.md)). The nodes share one VM's CPUs, kernel and clock: separate hardware is still to be compared |
+
+## Limitations
+
+- Simulation, not a cluster: SWF traces record processor counts, so the machine is one vertex with
+  N processors; there is no network, I/O or Raft replication cost.
+- FCFS priority only; Slurm multifactor/fair-share orders would change absolute numbers.
+- The carbon curve is stylised, not a measured grid; capacity profiles use UTC time-of-day.
+- 2-core sandbox: worker-scaling results understate multi-core hardware.
+
+## Reproduce
+
+```sh
+# traces: Parallel Workloads Archive SWF files (SDSC-SP2-1998-4.2-cln, CTC-SP2-1996-3.1-cln, HPC2N-2002-2.2-cln)
+cargo run --release -p gnomon-sim --bin experiments -- <dir-with-swf> results 5000
+cargo run --release -p gnomon-sim --bin experiments -- <dir-with-swf> results 5000 --only e1   # E1/§3b alone
+cargo run --release -p gnomon-sched --bin occ_bench > results/occ_conflicts.csv
+cargo run --release -p gnomon-sched --bin bench > bench_results.csv
+cargo run --release -p gnomon-sim --bin replay_gate -- --traces <dir-with-swf>   # §7 gate
+python3 .github/scripts/occ_ab.py <base occ_bench> <new occ_bench>               # §7 A/B
+cargo test -p gnomon-consensus --test replication                                 # §8 three Raft replicas over TCP
+testkit/validate-host.sh                                                          # §8 real-host cgroup v2 + containers
+testkit/multinode.sh all                                                          # §8 multi-node Gnomon vs Slurm (Docker)
+```
+
+Raw data: `e1_runtime_quantiles.csv`, `e1b_bias_corrected.csv` (§3b subset of E1), `e2_capacity_profiles.csv`, `occ_conflicts.csv`,
+`SUMMARY_raw.md` (E0/E3), `e0_sample_journal_head.jsonl` (journal format sample).
+
+## References
+
+- Parallel Workloads Archive (Feitelson et al.): https://www.cs.huji.ac.il/labs/parallel/workload/
+- Nissimov & Feitelson, *Probabilistic Backfilling* (JSSPP 2007): https://cris.huji.ac.il/en/publications/probabilistic-backfilling/
+- Survey of runtime-estimate effects on backfilling (Tsafrir et al. 2007, Fan et al. 2017 and others): https://arxiv.org/pdf/2109.09269
+- Gibbs & Candès, *Adaptive Conformal Inference Under Distribution Shift* (NeurIPS 2021) — online quantile tracking behind §3b: https://arxiv.org/abs/2106.00170
+- Gundla, *Beyond Regression Accuracy* (2026) — estimation bias vs accuracy: https://www.proquest.com/docview/3353132919/$N
+- Sustainability in HPC — carbon-aware backfill plugins for Slurm/Flux: https://arxiv.org/pdf/2309.13473
+- COAST — congestion-aware start times for carbon-aware HPC jobs: https://arxiv.org/pdf/2609.05443
+- Slurm simulator validation (≤1.7% deviation): https://www.dcs.warwick.ac.uk/pmbs/pmbs18/PMBS/abstracts/paper9.html

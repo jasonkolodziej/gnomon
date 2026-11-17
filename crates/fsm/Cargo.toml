@@ -1,0 +1,12 @@
+[package]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+name = "gnomon-fsm"
+description = "In-memory replicated state machine: Raft-agnostic apply + immutable snapshots"
+[dependencies]
+gnomon-core = { path = "../core" }
+gnomon-graph = { path = "../graph" }
+serde = { version = "1", features = ["derive"] }
+[dev-dependencies]
+serde_json = "1"

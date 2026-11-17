@@ -1,0 +1,2 @@
+test=t04 tag=blocker jobid=6 rank=2 nnodes=3 event=start t=1794907051.096822963 host=node3 nodelist=node1,node2,node3 cpus=4
+test=t04 tag=blocker jobid=6 rank=2 event=end t=1794907111.101619375 code=0

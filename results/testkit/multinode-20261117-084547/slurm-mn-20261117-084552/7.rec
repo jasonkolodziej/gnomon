@@ -1,0 +1,2 @@
+test=t04 tag=blocker jobid=7 event=start t=1794905487 host=node1 cpus=4 nproc=4
+test=t04 tag=blocker jobid=7 event=end t=1794905547 code=0
