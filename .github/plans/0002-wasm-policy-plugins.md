@@ -1,6 +1,6 @@
 # 0002 — Sandboxed WASM plugins for scheduling policy
 
-**Status**: Proposed
+**Status**: Accepted (steps 1–4 implemented, see [Implementation](#implementation))
 **Date**: 2026-11-17
 
 ## Context
@@ -141,8 +141,43 @@ controller plugins. It gets its own ADR.
   surface: breaking changes need a new major version, and the host should support at least the
   previous one.
 - **Operations**: plugin path, fuel budget and memory cap become controller configuration, and belong
-  in `docs/INSTALL.md` once step 2 lands. Every replica must load the same plugin for consistent
-  priorities after a failover. The leader computes the value, but a different plugin on the new
-  leader changes later decisions.
+  in `docs/INSTALL.md` once step 2 lands. Every replica must load the same plugin: the submit handler
+  runs on whichever replica receives the request (followers forward only the finished event), so
+  different plugins give different priorities depending on which replica a client reached.
 - **Follow-ups**: separate ADRs for `admission` (if it can rewrite jobs) and for WASM job execution
   on the agent.
+
+## Implementation
+
+Steps 1–4 are implemented. Where the code differs from the text above:
+
+- **Steps 1 and 3 together.** The pointer/JSON core-module interface was removed rather than hardened
+  first: `PriorityPlugin` (`crates/policy/src/plugin.rs`) loads components for the WIT world in
+  `crates/policy/wit/priority.wit` through `bindgen!`, pre-links them into an `InstancePre`, and runs
+  each call in a fresh `Store` with fuel and a `StoreLimits` memory cap (`trap_on_grow_failure`, so a
+  memory bomb traps instead of carrying on). The linker defines only the types-only `types`
+  interface, so a component importing anything else (WASI included) fails to load.
+  `crates/policy/tests/plugin.rs` covers an infinite loop, memory growth past the cap, oversized
+  initial memory, a trap, an impure import and a core module, all with hand-written component WAT
+  (`gnomon_policy::fixtures`) so the tests need no WASM toolchain.
+- **Fallback and counters.** `PriorityHook` pairs an optional plugin with `PolicyConfig` and counts
+  calls and failures (`AtomicU64`s; the controller has no metrics endpoint yet, so failures are
+  logged with the running count rather than exported as a gauge).
+- **Wiring keeps wasmtime out of the API client.** `gnomon-api` defines a `SubmitPriority` trait and
+  `SchedulerSvc::priority: Option<Arc<dyn SubmitPriority>>`. `gnomon-ctl` implements it from a
+  `PriorityHook`, so `gnomon-agent`, `gnomon-cli` and `gnomon-top` (which depend on `gnomon-api`) do
+  not link wasmtime. The priority is computed after the job id is chosen and recorded in
+  `JobSubmitted`. Without `--priority-plugin` or `--policy-config` the client's priority is kept, as
+  before. Flags: `--priority-plugin`, `--policy-config`, `--plugin-fuel`, `--plugin-memory-mb`
+  (with `GNOMON_*` equivalents, see `docs/INSTALL.md`). A plugin that does not load stops startup.
+- **Example plugin.** `examples/priority-plugin` (outside the workspace) is built in the `Rust`
+  workflow's `wasm-plugin` job for `wasm32-unknown-unknown` (which links no WASI) and wrapped with
+  `wasm-tools component new`; `crates/policy/tests/example_plugin.rs` then loads it in the host.
+- **Offline evaluation without `ShadowPolicy`.** `ShadowPolicy` compares *placements* for the same
+  job, which a priority function does not change; it changes queue *order*. Step 4 is instead
+  `experiments --priority-plugin` (experiment E4): each SWF window is scheduled under FCFS and under
+  the plugin's submit-time priorities (`gnomon_sim::priority::assign`), and
+  `gnomon_sim::priority::fcfs_agreement` reports the fraction of job pairs left in submit order.
+  A live priority shadow (compute the candidate beside the deployed plugin and log the difference)
+  is left for later.
+- **Step 5** (further worlds) is not started.

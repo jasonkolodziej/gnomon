@@ -330,6 +330,8 @@ with reservations), serves the gRPC API and, optionally, replicates through Raft
 
 ```text
 gnomon-ctl [--listen ADDR] [--state-dir DIR] [--raft-id N --raft-peers ID=HOST:PORT,...]
+           [--priority-plugin FILE.wasm] [--policy-config FILE.json]
+           [--plugin-fuel N] [--plugin-memory-mb N]
 gnomon-ctl --demo        # in-process demo: submits a few jobs and prints the plan, then exits
 ```
 
@@ -341,6 +343,10 @@ gnomon-ctl --demo        # in-process demo: submits a few jobs and prints the pl
 | `--raft-peers LIST` | `GNOMON_RAFT_PEERS` | none | `1=ctl1:7700,2=ctl2:7700,...`; this replica's entry is also its Raft listen address |
 | | `GNOMON_HEARTBEAT_SECS` | `10` | interval agents heartbeat and poll for work (sent at registration; agents use at least 2) |
 | | `GNOMON_NODE_TIMEOUT_SECS` | 3 × heartbeat, at least `30` | seconds without a heartbeat after which the leader declares a node lost and fails its jobs |
+| `--priority-plugin FILE` | `GNOMON_PRIORITY_PLUGIN` | none | WASM priority plugin (a component for the `gnomon:policy/priority` world); see [Priority plugins](#priority-plugins) |
+| `--policy-config FILE` | `GNOMON_POLICY_CONFIG` | built-in defaults | declarative policy JSON (`PolicyConfig`): the priority when there is no plugin, and the fallback when the plugin fails |
+| `--plugin-fuel N` | `GNOMON_PLUGIN_FUEL` | `10000000` | instruction budget per plugin call |
+| `--plugin-memory-mb N` | `GNOMON_PLUGIN_MEMORY_MB` | `16` | linear-memory cap per plugin call |
 
 Flags win over environment variables. A flag given without a value is an error rather than a silent
 fallback (a typo must not quietly disable durability). The controller logs to stdout/stderr.
@@ -349,6 +355,29 @@ fallback (a typo must not quietly disable durability). The controller logs to st
 gnomon-ctl                                   # in-memory, for experiments
 gnomon-ctl --state-dir /var/lib/gnomon       # durable single controller
 ```
+
+### Priority plugins
+
+By default a job keeps the priority its client submitted (`gnbatch` sends 1000). With
+`--priority-plugin` or `--policy-config` the controller computes it instead, once, when the job is
+submitted, and records the value in the replicated `JobSubmitted` event
+([ADR 0002](../.github/plans/0002-wasm-policy-plugins.md)):
+
+- A plugin is a WebAssembly component implementing
+  [`crates/policy/wit/priority.wit`](../crates/policy/wit/priority.wit). It may import nothing (no
+  WASI, no clock: the current time is a parameter), so it can only compute from the job fields it is
+  given. [`examples/priority-plugin`](../examples/priority-plugin) is a Rust example with build
+  steps.
+- Every call is bounded by `--plugin-fuel` and `--plugin-memory-mb`. A call that runs out of either,
+  or traps, gets the declarative priority from `--policy-config` instead; the controller logs it with
+  the running failure count. A plugin or config file that does not load stops the controller at
+  startup.
+- **Give every replica the same plugin and config.** Only the replica handling a submission runs the
+  plugin, so replicas with different plugins assign different priorities depending on which one a
+  client reached.
+- Evaluate a candidate offline before deploying it: `experiments <swf-dir> <out> 5000 --only e4
+  --priority-plugin candidate.wasm` schedules SWF trace windows under FCFS and under the plugin and
+  writes `e4_priority_plugin.csv`.
 
 ### gnomon-agent
 

@@ -73,11 +73,11 @@ flowchart TD
     policy --> core
     consensus --> core & fsm
     api --> core & fsm & sched
-    ctl --> core & fsm & sched & api & consensus
+    ctl --> core & fsm & sched & api & consensus & policy
     agent --> core & api
     cli --> api
     top --> api
-    sim --> core & rgraph & fsm & sched
+    sim --> core & rgraph & fsm & sched & policy
 
     classDef bin fill:#e8f1ff,stroke:#3b6fd4
     class ctl,agent,cli,top bin
@@ -87,7 +87,9 @@ Arrows point from a crate to what it depends on. The shipped binaries (blue) are
 `gnomon-agent`, `gnomon-cli` and `gnomon-top` only share `gnomon-api`'s generated client with the
 controller, so node and user tools never link the scheduler. `gnomon-sim` runs the production
 `backfill_pass` against recorded or synthetic workloads, which is how the replay gate in CI checks
-schedule quality. `gnomon-policy` is a library that is not wired into `gnomon-ctl` yet.
+schedule quality. `gnomon-policy` (declarative policy and sandboxed WASM priority plugins) is linked
+by `gnomon-ctl`, which hands the submit handler a priority function through `gnomon-api`'s
+`SubmitPriority` trait, so the API client crates never link wasmtime.
 
 ## Inside the controller
 
