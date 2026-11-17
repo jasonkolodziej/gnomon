@@ -1,0 +1,131 @@
+{
+  // --- Editor ---
+  "editor.formatOnSave": true,
+  "editor.formatOnPaste": false,
+  "editor.rulers": [120],
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true,
+  "editor.trimAutoWhitespace": true,
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "files.trimFinalNewlines": true,
+
+  // --- agent chat ---
+  "chat.mcp.autostart": "newAndOutdated",
+
+  // --- Language overrides ---
+  "[json]": {
+    "editor.tabSize": 2,
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[jsonc]": {
+    "editor.tabSize": 2,
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[yaml]": {
+    "editor.tabSize": 2,
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[markdown]": {
+    "editor.wordWrap": "on",
+    "editor.quickSuggestions": {
+      "other": "on",
+      "comments": "off",
+      "strings": "off"
+    }
+  },
+
+  // --- GitHub Copilot ---
+  "github.copilot.enable": {
+    "*": true,
+    "plaintext": false,
+    "markdown": true,
+    "scminput": false
+  },
+  // VS Code 1.146+ favors skills and repository instructions over the legacy prompt-files model.
+  "chat.instructionsFilesLocations": {
+    ".github/instructions": true
+  },
+
+  // --- Git ---
+  "git.enableSmartCommit": true,
+  "git.autofetch": true,
+  "git.confirmSync": false,
+
+  // --- Files ---
+  "files.exclude": {
+    "**/.git": true,
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/.git": true
+  },
+
+  // --- YAML ---
+  "yaml.schemas": {
+    "https://json.schemastore.org/github-workflow.json": [
+      ".github/workflows/*.yml",
+      ".github/workflows/*.yaml"
+    ]
+  },
+
+  // --- Sveltekit Guard ---
+  "workbench.editor.customLabels.enabled": true,
+  "workbench.editor.customLabels.patterns": {
+    "**/src/routes/**/-guard.{ts,js}": "${dirname} - Guard"
+  },
+
+  // --- Python ---
+  // "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  // "python.terminal.activateEnvironment": true,
+
+  // --- Markdown ---
+  // "markdownlint.config": { ... } - See `.markdownlint.json`
+
+  // --- ShellCheck ---
+  "shellcheck.enable": true,
+  "shellcheck.enableQuickFix": true,
+  "shellcheck.markdownDiagnostics": false,
+  "shellcheck.run": "onType",
+  "shellcheck.executablePath": "", // Priority: user defined > bundled binary > shellcheck in PATH
+  "shellcheck.exclude": [],
+  "shellcheck.customArgs": [],
+  "shellcheck.ignorePatterns": {
+    "**/*.csh": true,
+    "**/*.cshrc": true,
+    "**/*.fish": true,
+    "**/*.login": true,
+    "**/*.logout": true,
+    "**/*.tcsh": true,
+    "**/*.tcshrc": true,
+    "**/*.xonshrc": true,
+    "**/*.xsh": true,
+    "**/*.zsh": true,
+    "**/*.zshrc": true,
+    "**/zshrc": true,
+    "**/*.zprofile": true,
+    "**/zprofile": true,
+    "**/*.zlogin": true,
+    "**/zlogin": true,
+    "**/*.zlogout": true,
+    "**/zlogout": true,
+    "**/*.zshenv": true,
+    "**/zshenv": true,
+    "**/*.zsh-theme": true
+  }
+  // "shellcheck.ignoreFileSchemes": [
+  //   "git",
+  //   "gitfs",
+  //   "output",
+  //   "review",
+  //   "pr",
+  //   "githubpr",
+  //   "gitpr",
+  //   "githubcommit"
+  // ]
+}

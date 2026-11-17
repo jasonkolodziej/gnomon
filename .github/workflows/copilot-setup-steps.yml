@@ -1,0 +1,66 @@
+name: "Copilot Setup Steps"
+
+# Run the setup steps when they change (validates the workflow) and allow
+# manual test runs from the Actions tab.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+jobs:
+  # This job MUST be named `copilot-setup-steps` for the cloud agent to pick it up.
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+
+    # Minimal permissions required for the setup steps below.
+    # Copilot is granted its own token for its own operations.
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # graphify CLI + MCP server, so the cloud agent can query the committed
+      # knowledge graphs (see GRAPHIFY.md and .github/instructions/graphify.instructions.md).
+      - name: Set up Python for graphify
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install graphify
+        env:
+          GRAPHIFY_VERSION: ${{ vars.GRAPHIFY_VERSION }}
+        run: |
+          python -m pip install --disable-pip-version-check "graphifyy[mcp]${GRAPHIFY_VERSION:+==${GRAPHIFY_VERSION}}"
+          graphify --version
+
+      # ---------------------------------------------------------------
+      # Add project-specific setup steps below.
+      # Examples: install Node.js, Python, Go, or other runtimes;
+      # restore dependency caches; install CLI tools, etc.
+      # ---------------------------------------------------------------
+
+      # Example: Node.js setup (uncomment and adapt as needed)
+      # - name: Set up Node.js
+      #   uses: actions/setup-node@v4
+      #   with:
+      #     node-version: "20"
+      #     cache: "npm"
+      #
+      # - name: Install dependencies
+      #   run: npm ci
+
+      # Example: Python setup (uncomment and adapt as needed)
+      # - name: Set up Python
+      #   uses: actions/setup-python@v5
+      #   with:
+      #     python-version: "3.12"
+      #     cache: "pip"
+      #
+      # - name: Install dependencies
+      #   run: pip install -r requirements.txt

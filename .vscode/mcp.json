@@ -1,0 +1,83 @@
+{
+  "servers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/"
+    },
+    "cloudflare-documentation": {
+      "type": "http",
+      "url": "https://docs.mcp.cloudflare.com/mcp"
+    },
+    "cloudflare-api": {
+      "type": "http",
+      "url": "https://mcp.cloudflare.com/mcp",
+      "headers": {
+        "Authorization": "${input:cloudflare-api-token}"
+      }
+    },
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": "${input:context7-api-key}"
+      }
+    },
+    "svelte": {
+      "type": "http",
+      "url": "https://mcp.svelte.dev/mcp"
+    },
+    "better-auth": {
+      "type": "http",
+      "url": "https://mcp.better-auth.com/mcp"
+    },
+    "deepwiki": {
+      "type": "http",
+      "url": "https://mcp.deepwiki.com/mcp"
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    },
+    "tailwindcss-server": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "tailwindcss-mcp-server"]
+    },
+    "shadcn-ui-svelte": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["@jpisnice/shadcn-ui-mcp-server", "--framework", "svelte"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${input:shadcn-ui-gh-key}"
+      }
+    },
+    // The repository knowledge graph (see GRAPHIFY.md). Needs `graphify-mcp` on PATH:
+    // run the "graphify: install CLI" task first.
+    "graphify": {
+      "type": "stdio",
+      "command": "graphify-mcp",
+      "args": ["${workspaceFolder}/graphify-out/graph.json"]
+    }
+  },
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "shadcn-ui-gh-key",
+      "description": "GitHub Personal Access Token for Shadcn UI MCP",
+      "password": true
+    },
+    {
+      "type": "promptString",
+      "id": "cloudflare-api-token",
+      "description": "Cloudflare API Token for [CI/CD](https://dash.cloudflare.com/profile/api-tokens)",
+      "password": true
+    },
+    {
+      "type": "promptString",
+      "id": "context7-api-key",
+      "description": "Context7 API Key",
+      "password": true
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+# Paths graphify skips when a target in .github/graphify/targets.txt covers them
+# (gitignore syntax; .gitignore is honoured too).
+
+# Vendored graphify source shipped as an agent skill: large, and not this project's code.
+.agents/skills/graphify/
+
+# Generated output
+graphify-out/
+_site/
+
+# Secrets. Already gitignored (graphify honours .gitignore) and not code, so
+# never extracted; listed so a `--no-gitignore` run can't pick them up either.
+.env
+.env.*
+.dev.vars

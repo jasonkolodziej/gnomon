@@ -1,0 +1,14 @@
+{
+  "recommendations": [
+    "github.copilot",
+    "github.copilot-chat",
+    "github.vscode-pull-request-github",
+    "editorconfig.editorconfig",
+    "esbenp.prettier-vscode",
+    "redhat.vscode-yaml",
+    "yzhang.markdown-all-in-one",
+    "streetsidesoftware.code-spell-checker",
+    "timonwong.shellcheck",
+    "saoudrizwan.claude-dev"
+  ]
+}

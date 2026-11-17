@@ -1,0 +1,81 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run Tests",
+      "type": "shell",
+      "command": "pytest",
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      // Installs the graphify CLI (`graphify`) and MCP server (`graphify-mcp`).
+      "label": "graphify: install CLI",
+      "type": "shell",
+      "command": "if command -v uv >/dev/null; then uv tool install --upgrade 'graphifyy[mcp,watch,anthropic,openai,gemini]'; elif command -v pipx >/dev/null; then pipx install --force 'graphifyy[mcp,watch,anthropic,openai,gemini]'; else python3 -m pip install --user --upgrade 'graphifyy[mcp,watch,anthropic,openai,gemini]'; fi",
+      "problemMatcher": []
+    },
+    {
+      "label": "graphify: rebuild graph (all targets)",
+      "detail": "Rebuild ./graphify-out/ from every directory in .github/graphify/targets.txt",
+      "type": "shell",
+      "command": "bash .github/graphify/update.sh",
+      "problemMatcher": []
+    },
+    {
+      "label": "graphify: update targets changed vs origin/main",
+      "type": "shell",
+      "command": "git fetch --quiet origin main && bash .github/graphify/update.sh --changed origin/main",
+      "problemMatcher": []
+    },
+    {
+      "label": "graphify: rebuild one target…",
+      "type": "shell",
+      "command": "bash .github/graphify/update.sh --${input:graphifyMode} '${input:graphifyDir}'",
+      "problemMatcher": []
+    },
+    {
+      "label": "graphify: query…",
+      "type": "shell",
+      "command": "graphify query '${input:graphifyQuestion}'",
+      "problemMatcher": []
+    },
+    {
+      "label": "graphify: serve MCP over HTTP (localhost:8099)",
+      "detail": "Streamable HTTP endpoint at http://127.0.0.1:8099/mcp; set GRAPHIFY_API_KEY to require a key",
+      "type": "shell",
+      "command": "graphify-mcp graphify-out/graph.json --transport http --port 8099",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "graphify: build Pages site locally (_site/)",
+      "type": "shell",
+      "command": "python3 .github/graphify/build_site.py _site",
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "graphifyDir",
+      "type": "promptString",
+      "description": "Target directory to rebuild (must be listed in .github/graphify/targets.txt)",
+      "default": "skills"
+    },
+    {
+      "id": "graphifyMode",
+      "type": "pickString",
+      "description": "Extraction mode",
+      "options": ["code-only", "full"],
+      "default": "code-only"
+    },
+    {
+      "id": "graphifyQuestion",
+      "type": "promptString",
+      "description": "Symbol, file or concept names to look up (labels match better than full sentences)"
+    }
+  ]
+}

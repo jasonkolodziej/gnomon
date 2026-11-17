@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  lint-and-validate:
+    name: Lint & Validate
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------
+      # Add language-specific lint, build, and test steps below.
+      # The steps below are general-purpose checks suitable for any repo.
+      # ---------------------------------------------------------------
+
+      - name: Install YAML validator dependency
+        run: python3 -m pip install --disable-pip-version-check --user pyyaml
+
+      - name: Validate YAML files
+        run: |
+          find . -type f \( -name "*.yml" -o -name "*.yaml" \) \
+            -not -path "*/.git/*" \
+            -not -path "*/node_modules/*" \
+            -not -path "*/dist/*" \
+            -not -path "*/vendor/*" \
+            | while read -r f; do
+              python3 -c "import yaml, pathlib; yaml.safe_load(pathlib.Path('$f').read_text())" \
+                && echo "OK: $f" \
+                || { echo "INVALID: $f"; exit 1; }
+            done
+
+      - name: Check for secret patterns
+        run: |
+          # Basic check to avoid accidentally committing common secret patterns.
+          # Extend this list as needed for your project.
+          if grep -rn \
+            --include="*.yml" --include="*.yaml" --include="*.json" \
+            --exclude-dir=".git" --exclude-dir="node_modules" --exclude-dir="dist" --exclude-dir="vendor" \
+            --exclude-dir="graphify-out" \
+            --exclude="package-lock.json" --exclude="pnpm-lock.yaml" --exclude="yarn.lock" \
+            -E "(password|secret|api_key|token)\s*[:=]\s*['\"]?[A-Za-z0-9+/]{20,}" \
+            .; then
+            echo "Potential secret detected in committed files."
+            exit 1
+          fi
+          echo "No secret patterns found."
