@@ -1158,6 +1158,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gnomon-core",
+ "gnomon-fsm",
+ "gnomon-graph",
+ "gnomon-sched",
  "serde",
  "serde_json",
  "wasmtime",

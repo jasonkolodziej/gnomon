@@ -2,15 +2,20 @@
 //!
 //! Scheduling policy is configuration, not code: fairshare weights, QoS
 //! tiers, per-user/partition limits are declarative JSON evaluated by pure
-//! functions. Priority computation can optionally be delegated to a
-//! WASM-sandboxed plugin ([`plugin`], ADR 0002): a pure, fuel- and
-//! memory-bounded wasmtime component that falls back to [`PolicyConfig`] when
-//! it fails, replacing Slurm's in-process C plugin hazards.
+//! functions. Four decisions can be delegated to WASM-sandboxed plugins
+//! ([`plugin`], ADR 0002–0004): priority, admission (Slurm's `job_submit`),
+//! runtime estimation and node scoring. Plugins are pure, fuel- and
+//! memory-bounded wasmtime components that fall back to declarative
+//! behaviour when they fail, replacing Slurm's in-process C plugin hazards.
 
 pub mod fixtures;
 pub mod plugin;
 
-pub use plugin::{PluginError, PluginLimits, PriorityHook, PriorityPlugin};
+pub use plugin::admission::{AdmissionHook, AdmissionPlugin, FailMode, Rewrite, Verdict};
+pub use plugin::estimator::{EstimatorPlugin, WasmEstimator};
+pub use plugin::node_score::{Candidate, NodeScorePlugin, ScoredPolicy, DEFAULT_MAX_CANDIDATES};
+pub use plugin::priority::{PriorityHook, PriorityPlugin, ShadowOutcome, ShadowPriority};
+pub use plugin::{PluginError, PluginLimits};
 
 use gnomon_core::{Job, Resources};
 use serde::{Deserialize, Serialize};

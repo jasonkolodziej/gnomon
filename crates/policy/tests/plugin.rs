@@ -137,3 +137,18 @@ fn hook_falls_back_to_declarative_policy_and_counts_failures() {
     assert_eq!(bad.calls.load(Ordering::Relaxed), 1);
     assert_eq!(bad.failures.load(Ordering::Relaxed), 1);
 }
+
+#[test]
+fn shadow_priority_counts_disagreements_without_applying() {
+    use gnomon_policy::{ShadowOutcome, ShadowPriority};
+    let shadow = ShadowPriority::new(load(&fixtures::size_age()));
+    let mut j = job();
+    j.priority = 2_460;
+    assert_eq!(shadow.compare(&j, 4_600), ShadowOutcome::Same);
+    j.priority = 1;
+    assert_eq!(shadow.compare(&j, 4_600), ShadowOutcome::Differs(2_460));
+    assert_eq!(j.priority, 1, "nothing applied");
+    assert!((shadow.agreement() - 0.5).abs() < 1e-9);
+    let broken = ShadowPriority::new(load(&fixtures::trap()));
+    assert!(matches!(broken.compare(&j, 0), ShadowOutcome::Failed(_)));
+}
