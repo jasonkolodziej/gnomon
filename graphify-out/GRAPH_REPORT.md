@@ -9,7 +9,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `b27205d7`
+- Built from commit: `bfe13f4c`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -124,9 +124,9 @@
 - 1-file cycle: `crates/consensus/src/wal.rs -> crates/consensus/src/wal.rs`
 - 1-file cycle: `crates/policy/src/plugin/admission.rs -> crates/policy/src/plugin/admission.rs`
 - 1-file cycle: `crates/policy/src/plugin/mod.rs -> crates/policy/src/plugin/mod.rs`
-- 2-file cycle: `crates/policy/src/lib.rs -> crates/policy/src/plugin/priority.rs -> crates/policy/src/lib.rs`
-- 2-file cycle: `crates/agent/src/container.rs -> crates/agent/src/launch.rs -> crates/agent/src/container.rs`
 - 2-file cycle: `crates/sched/src/bias.rs -> crates/sched/src/lib.rs -> crates/sched/src/bias.rs`
+- 2-file cycle: `crates/agent/src/container.rs -> crates/agent/src/launch.rs -> crates/agent/src/container.rs`
+- 2-file cycle: `crates/policy/src/lib.rs -> crates/policy/src/plugin/priority.rs -> crates/policy/src/lib.rs`
 
 ## Communities (84 total, 11 thin omitted)
 
@@ -431,16 +431,16 @@ Nodes (4): GangRelease, NotRunning, Released, Waiting
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `Fsm` connect `Community 34` to `Community 0`, `Community 1`, `Community 2`, `Community 5`, `Community 37`, `Community 7`, `Community 70`, `Community 9`, `Community 11`, `Community 12`, `Community 49`, `Community 18`, `Community 22`, `Community 23`, `Community 27`, `Community 28`, `Community 29`?**
-  _High betweenness centrality (0.080) - this node is a cross-community bridge._
+  _High betweenness centrality (0.074) - this node is a cross-community bridge._
 - **Are the 39 inferred relationships involving `JobId` (e.g. with `container_image_flows_from_submit_to_job_info_and_fetch_work()` and `fsm_with_node()`) actually correct?**
   _`JobId` has 39 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `Block`, `Record`, `Job` to the rest of the system?**
   _84 weakly-connected nodes found - possible missing edges._
 - **Should `Community 0` be split into smaller, more focused modules?**
   _Cohesion score 0.05067920585161965 - nodes in this community are weakly interconnected._
-- **Why does `JobId` connect `Community 37` to `Community 0`, `Community 1`, `Community 2`, `Community 5`, `Community 8`, `Community 11`, `Community 18`, `Community 20`, `Community 21`, `Community 22`, `Community 23`, `Community 27`, `Community 28`, `Community 29`, `Community 31`, `Community 32`, `Community 34`, `Community 41`, `Community 45`, `Community 49`, `Community 50`, `Community 51`, `Community 52`, `Community 55`, `Community 59`, `Community 61`, `Community 65`, `Community 75`?**
-  _High betweenness centrality (0.070) - this node is a cross-community bridge._
+- **Why does `Job` connect `Community 20` to `Community 1`, `Community 2`, `Community 5`, `Community 11`, `Community 16`, `Community 22`, `Community 23`, `Community 25`, `Community 29`, `Community 31`, `Community 32`, `Community 35`, `Community 37`, `Community 41`, `Community 42`, `Community 45`, `Community 47`, `Community 50`, `Community 59`, `Community 61`, `Community 66`, `Community 68`?**
+  _High betweenness centrality (0.073) - this node is a cross-community bridge._
 - **Should `Community 1` be split into smaller, more focused modules?**
   _Cohesion score 0.08231569425599276 - nodes in this community are weakly interconnected._
-- **Why does `Job` connect `Community 20` to `Community 1`, `Community 2`, `Community 5`, `Community 11`, `Community 16`, `Community 22`, `Community 23`, `Community 25`, `Community 29`, `Community 31`, `Community 32`, `Community 35`, `Community 37`, `Community 41`, `Community 42`, `Community 45`, `Community 47`, `Community 50`, `Community 59`, `Community 61`, `Community 66`, `Community 68`?**
-  _High betweenness centrality (0.055) - this node is a cross-community bridge._
+- **Why does `JobId` connect `Community 37` to `Community 0`, `Community 1`, `Community 2`, `Community 5`, `Community 8`, `Community 11`, `Community 18`, `Community 20`, `Community 21`, `Community 22`, `Community 23`, `Community 27`, `Community 28`, `Community 29`, `Community 31`, `Community 32`, `Community 34`, `Community 41`, `Community 45`, `Community 49`, `Community 50`, `Community 51`, `Community 52`, `Community 55`, `Community 59`, `Community 61`, `Community 65`, `Community 75`?**
+  _High betweenness centrality (0.063) - this node is a cross-community bridge._
