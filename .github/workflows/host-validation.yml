@@ -1,0 +1,62 @@
+name: Host validation
+
+# Validates job confinement on a real host: the agent's launcher against the kernel's cgroup v2
+# and real container runtimes (crates/agent/tests/host_validation.rs via testkit/validate-host.sh).
+# GitHub's Ubuntu 24.04 runners are full VMs with cgroup v2 (cpu and memory controllers), Docker
+# and Podman, i.e. the production shape of a Gnomon node; unit tests elsewhere use a fake
+# cgroupfs and a fake `docker`.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - "crates/agent/**"
+      - "crates/api/**"
+      - "proto/**"
+      - "testkit/validate-host.sh"
+      - ".github/workflows/host-validation.yml"
+  schedule:
+    - cron: "17 4 * * 3"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: short
+
+jobs:
+  validate:
+    name: cgroup v2 + ${{ matrix.runtime }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [docker, podman]
+    env:
+      GNOMON_CONTAINER_RUNTIME: ${{ matrix.runtime }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Validate cgroup v2 confinement and ${{ matrix.runtime }} containers
+        run: testkit/validate-host.sh

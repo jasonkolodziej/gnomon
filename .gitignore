@@ -156,3 +156,12 @@ _site/
 # Python bytecode (graphify helper scripts)
 __pycache__/
 *.py[cod]
+
+# Rust
+/target/
+
+# Gnomon test kit output
+testkit/out/
+
+# Claude Code agent worktrees (local only)
+.claude/worktrees/

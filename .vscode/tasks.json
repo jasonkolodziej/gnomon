@@ -63,7 +63,7 @@
       "id": "graphifyDir",
       "type": "promptString",
       "description": "Target directory to rebuild (must be listed in .github/graphify/targets.txt)",
-      "default": "skills"
+      "default": "."
     },
     {
       "id": "graphifyMode",

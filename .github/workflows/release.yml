@@ -1,0 +1,225 @@
+name: Release
+
+# Push a tag `vX.Y.Z` (matching [workspace.package] version in Cargo.toml) to publish:
+#   - gnomon-<tag>-<target>.tar.gz for x86_64/aarch64 Linux (glibc 2.35+) and aarch64 macOS,
+#     each with the binaries, the systemd units and env templates, README, INSTALL and LICENSE
+#   - SHA256SUMS over the tarballs
+#   - ghcr.io/<owner>/gnomon-{ctl,agent,cli}:<version> for linux/amd64 and linux/arm64
+# A tag with a pre-release suffix (v0.2.0-rc.1) makes a GitHub pre-release and does not move `latest`.
+# workflow_dispatch builds everything for a tag without publishing (a dry run).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (dry run: nothing is published)"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  TAG: ${{ inputs.tag || github.ref_name }}
+  PUBLISH: ${{ github.event_name == 'push' }}
+
+jobs:
+  check:
+    name: Check tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - id: v
+        name: Tag must match the workspace version
+        run: |
+          version=${TAG#v}
+          crate=$(awk '/^\[workspace.package\]/{s=1} s && /^version *=/{gsub(/[" ]/,"",$0); sub(/version=/,""); print; exit}' Cargo.toml)
+          if [ "$version" != "$crate" ]; then
+            echo "::error::tag $TAG does not match Cargo.toml version $crate"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          case $version in *-*) echo "prerelease=true" ;; *) echo "prerelease=false" ;; esac >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Ubuntu 22.04 keeps the glibc requirement at 2.35 (Debian 12, RHEL 9+, Ubuntu 22.04+).
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, arch: amd64 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, arch: arm64 }
+          - { target: aarch64-apple-darwin, os: macos-15 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+          save-if: false
+
+      - name: Build
+        run: >
+          cargo build --release --locked --target ${{ matrix.target }}
+          -p gnomon-ctl -p gnomon-agent -p gnomon-cli -p gnomon-top
+
+      - name: Smoke test
+        run: |
+          bin=target/${{ matrix.target }}/release
+          "$bin/gntop" --help >/dev/null
+          GNOMON_LISTEN=127.0.0.1:17631 "$bin/gnomon-ctl" & ctl=$!
+          ok=0
+          for _ in $(seq 1 50); do
+            GNOMON_ADDR=http://127.0.0.1:17631 "$bin/gninfo" && { ok=1; break; }
+            sleep 0.2
+          done
+          kill "$ctl"
+          [ "$ok" = 1 ]
+
+      - name: Package
+        id: pkg
+        run: |
+          name="gnomon-$TAG-${{ matrix.target }}"
+          mkdir -p "$name/bin" dist
+          for b in gnomon-ctl gnomon-agent gnbatch gnqueue gncancel gninfo gntop; do
+            cp "target/${{ matrix.target }}/release/$b" "$name/bin/"
+          done
+          cp -R packaging/systemd "$name/systemd"
+          cp README.md LICENSE docs/INSTALL.md "$name/"
+          tar -czf "dist/$name.tar.gz" "$name"
+          if [ -n "${{ matrix.arch }}" ]; then
+            mkdir -p "dist/linux-${{ matrix.arch }}"
+            cp "$name"/bin/* "dist/linux-${{ matrix.arch }}/"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  images:
+    name: Container images
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        image: [ctl, agent, cli]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-*-linux-gnu
+          path: dist
+          merge-multiple: true
+
+      - name: Restore executable bits
+        run: chmod +x dist/linux-*/*
+
+      - name: Image name
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/gnomon-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ steps.name.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }},enable=${{ needs.check.outputs.prerelease == 'false' }}
+          flavor: |
+            latest=${{ needs.check.outputs.prerelease == 'false' }}
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: env.PUBLISH == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Binaries come from the native builds above (BINS=prebuilt); QEMU only runs apt for arm64.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.image }}
+          platforms: linux/amd64,linux/arm64
+          build-args: BINS=prebuilt
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  release:
+    name: GitHub release
+    needs: [check, build, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum ./*.tar.gz | sed 's| \./| |' > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
+        run: |
+          flags=(--verify-tag --generate-notes --title "Gnomon $TAG")
+          [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${flags[@]}" dist/*.tar.gz dist/SHA256SUMS
+
+      - name: Summary
+        run: |
+          {
+            echo "## Gnomon $TAG"
+            echo
+            [ "$PUBLISH" = true ] || echo "_Dry run: nothing published._"
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

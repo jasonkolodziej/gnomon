@@ -17,6 +17,6 @@
 #   services/api      code-only
 #   docs              full
 
-# Template test target: the bundled agent skills (mostly Markdown, so "full" gives a
-# much richer graph when an API key is configured).
-skills  full
+# The whole Gnomon repository: Rust crates, proto/, testkit/ (see .graphifyignore for what is
+# skipped). code-only = local AST extraction, no API key needed.
+.  code-only
