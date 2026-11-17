@@ -358,6 +358,9 @@ async fn main() {
                 leading = now_leading;
                 match broker.dequeue() {
                     Some(eval) if leading => {
+                        // Extend overruns first: the FSM refuses a start on
+                        // resources an overrunning job still holds.
+                        gnomon_sched::extend_overruns(&fsm, policy.as_ref(), fsm.now());
                         let snap = fsm.snapshot();
                         if let Some(job) = snap.job(eval.job) {
                             if job.state == gnomon_core::JobState::Pending {

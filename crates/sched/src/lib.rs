@@ -695,6 +695,29 @@ pub struct PassStats {
     pub conflicts: u64,
 }
 
+/// Extend every running job that has outlived its planned span (by
+/// `policy.extend_secs`) and return how many were extended. `backfill_pass`
+/// does this first; event-driven workers should too before placing, since
+/// the FSM refuses a start that would overlap an unextended overrun.
+/// Extensions only lengthen spans, so concurrent callers are harmless.
+pub fn extend_overruns(fsm: &Fsm, policy: &dyn Policy, now: u64) -> u64 {
+    let overruns: Vec<(JobId, u64)> = fsm.read(|st| {
+        st.jobs
+            .values()
+            .filter(|j| j.state == JobState::Running)
+            .filter_map(|j| {
+                let (s, d) = (j.planned_start?, j.planned_dur?);
+                (s + d <= now).then(|| (j.id, s + policy.extend_secs(j, now - s)))
+            })
+            .collect()
+    });
+    let n = overruns.len() as u64;
+    for (job, new_end) in overruns {
+        fsm.apply(Event::JobExtended { job, new_end });
+    }
+    n
+}
+
 /// Conservative backfill with compression: extend overrunning predictions,
 /// clear reservations, then place pending jobs in priority order (the first
 /// `max_reservations` that can't start now get reservations). All changes
@@ -706,23 +729,11 @@ pub fn backfill_pass(
     opts: PassOptions,
 ) -> PassStats {
     let now = fsm.now();
-    let mut stats = PassStats::default();
-
-    // 1. Overruns: running jobs past their planned span get extended.
-    let overruns: Vec<(JobId, u64)> = fsm.read(|st| {
-        st.jobs
-            .values()
-            .filter(|j| j.state == JobState::Running)
-            .filter_map(|j| {
-                let (s, d) = (j.planned_start?, j.planned_dur?);
-                (s + d <= now).then(|| (j.id, s + policy.extend_secs(j, now - s)))
-            })
-            .collect()
-    });
-    for (job, new_end) in overruns {
-        fsm.apply(Event::JobExtended { job, new_end });
-        stats.extended += 1;
-    }
+    let mut stats = PassStats {
+        // 1. Overruns: running jobs past their planned span get extended.
+        extended: extend_overruns(fsm, policy, now),
+        ..PassStats::default()
+    };
 
     // 2. Re-plan: show the policy the queue with last pass's reservations,
     // then drop them (they are recomputed below).
