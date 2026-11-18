@@ -7,10 +7,12 @@
 <title>gnomon</title>
 <link rel="icon" href="favicon.png">
 <style>
+  @font-face{font-family:"JetBrains Mono";font-weight:500;src:url(fonts/JetBrainsMono-Medium.ttf)}
+  @font-face{font-family:"Space Grotesk";font-weight:600;src:url(fonts/SpaceGrotesk-SemiBold.ttf)}
   html,body{margin:0;width:100%;height:100%;overflow:hidden;overscroll-behavior:none;touch-action:none;background:#0B1220}
   #status{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;
-          font:14px/1.6 "JetBrains Mono","IBM Plex Mono",ui-monospace,monospace;color:#94A3B8;text-align:center;padding:24px}
-  #status b{color:#5EEAD4;font-size:18px} #status b i{color:#14B8A6;font-style:normal}
+          font:14px/1.6 "JetBrains Mono",ui-monospace,monospace;color:#94A3B8;text-align:center;padding:24px}
+  #status b{color:#F8FAFC;font:600 22px "Space Grotesk",sans-serif;letter-spacing:-0.02em} #status b i{color:#14B8A6;font-style:normal}
   #status a{color:#14B8A6}
 </style>
 <div id="status"><b><i>▍</i>gnomon</b><span id="msg">loading…</span></div>

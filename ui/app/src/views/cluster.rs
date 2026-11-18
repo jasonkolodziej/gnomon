@@ -59,7 +59,7 @@ pub fn view(s: &State) -> El {
         .max(1);
     for m in &c.members {
         let role = if m.leader {
-            ("★ leader", teal_light())
+            ("◈ leader", teal_light())
         } else if m.id == c.node_id {
             ("this replica", paper())
         } else {

@@ -54,7 +54,13 @@ fn waiting() -> El {
         .grow(1.0)
         .center()
         .gap(10.0)
-        .child(tb("▍gnomon", teal_light()))
+        .child(
+            row()
+                .center_y()
+                .gap(2.0)
+                .child(text("▍").font(mono_b(26.0)).color(teal()))
+                .child(text("gnomon").font(wordmark(28.0)).color(paper())),
+        )
         .child(t("connecting to gnomon-web…", muted()))
         .child(ts("append ?demo to the URL to explore sample data", dim()))
 }
@@ -64,7 +70,7 @@ fn header(s: &State) -> El {
     let (dot, status, color) = match (s.demo, v.map(|v| v.connected), s.live) {
         (true, _, _) => ("◆", "demo data".to_string(), amber()),
         (_, Some(true), true) => ("●", "live".to_string(), teal()),
-        (_, Some(true), false) => ("◐", "reconnecting".to_string(), amber()),
+        (_, Some(true), false) => ("◔", "reconnecting".to_string(), amber()),
         (_, Some(false), _) => (
             "●",
             v.and_then(|v| v.error.clone())
@@ -86,11 +92,7 @@ fn header(s: &State) -> El {
                 .center_y()
                 .gap(2.0)
                 .child(text("▍").font(mono_b(18.0)).color(teal()))
-                .child(
-                    text("gnomon")
-                        .font(mono_b(16.0).tracking(-0.3))
-                        .color(paper()),
-                ),
+                .child(text("gnomon").font(wordmark(19.0)).color(paper())),
         )
         .child(
             row()

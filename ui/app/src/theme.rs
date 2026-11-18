@@ -13,9 +13,10 @@ fn c(s: &str) -> Color {
 pub fn ink() -> Color {
     c("#0B1220")
 }
-/// A panel one step above the page.
+/// Panels sit on the page itself: Ink, set apart by hairline rules (`line`),
+/// as in a terminal. Slate is the one raised tone.
 pub fn panel() -> Color {
-    c("#0F172A")
+    ink()
 }
 /// Slate: raised surfaces, selection.
 pub fn slate() -> Color {
@@ -81,12 +82,30 @@ pub fn state_tag(state: &str) -> &'static str {
     }
 }
 
+/// The brand's type (assets/logo/BRAND.md): JetBrains Mono Medium for the UI,
+/// Space Grotesk SemiBold for the wordmark. Both are bundled (`assets/fonts`).
+pub const MONO_FAMILY: &str = "JetBrains Mono";
+pub const WORDMARK_FAMILY: &str = "Space Grotesk";
+
+pub static FONTS: &[&[u8]] = &[
+    include_bytes!("../../assets/fonts/JetBrainsMono-Medium.ttf"),
+    include_bytes!("../../assets/fonts/JetBrainsMono-Bold.ttf"),
+    include_bytes!("../../assets/fonts/SpaceGrotesk-SemiBold.ttf"),
+];
+
 pub const fn mono(size: f32) -> TextStyle {
-    TextStyle::new(size, 400.0).mono()
+    TextStyle::new(size, 500.0).mono()
 }
 
 pub const fn mono_b(size: f32) -> TextStyle {
-    TextStyle::new(size, 600.0).mono()
+    TextStyle::new(size, 700.0).mono()
+}
+
+/// The wordmark: Space Grotesk 600, lowercase, tracked −2%.
+pub fn wordmark(size: f32) -> TextStyle {
+    TextStyle::new(size, 600.0)
+        .family(rune::tok::Family::Named(WORDMARK_FAMILY))
+        .tracking(-0.02 * size)
 }
 
 /// Body text size.

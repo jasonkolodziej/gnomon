@@ -10,7 +10,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-rune = { git = "https://github.com/anomalyco/rune", rev = "3ef98871fb72307872d44995777c543028d3bc50", default-features = false, features = ["embedded-fonts", "svg"] }
+rune = { git = "https://github.com/anomalyco/rune", rev = "3ef98871fb72307872d44995777c543028d3bc50", default-features = false, features = ["svg"] }
 
 # Rune builds against patched copies of these crates and asks apps to patch them too
 # ("a dependency's [patch] doesn't apply to the workspace that depends on it").

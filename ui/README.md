@@ -33,12 +33,15 @@ cd ui && for v in timeline nodes queue cluster policy events lab; do
 done
 ```
 
-(This needs a Vulkan driver, e.g. Mesa's lavapipe on a machine without a GPU, and the IBM Plex
-fonts installed, which the browser build embeds.)
+(This needs a Vulkan driver, e.g. Mesa's lavapipe on a machine without a GPU.)
 
 `↑`/`↓` move the queue selection, `x` cancels the selected job, `Esc` dismisses. The colours are the
 brand palette ([`assets/logo/BRAND.md`](../assets/logo/BRAND.md)): Ink background, Slate panels,
-Paper text, Signal Teal accent; job states follow `gntop`.
+Paper text, Signal Teal accent; job states follow `gntop`. The type is the brand's too, bundled
+in [`assets/fonts`](assets/fonts) (SIL OFL 1.1) and compiled into the app, so the browser and the
+snapshots draw the same faces: JetBrains Mono Medium throughout (Bold for emphasis), and the
+wordmark in Space Grotesk SemiBold, lowercase, tracked −2%. `SpaceGrotesk-SemiBold.ttf` is a static
+instance (wght 600) of the variable font from Google Fonts.
 
 ## Run it
 
@@ -100,6 +103,7 @@ crates stay on stable. The UI shares only the JSON types, through
 | `app/src/views/` | one module per view |
 | `app/src/net.rs` | `EventSource` on `/api/stream` and `fetch` for actions, applied with `AppHandle::update` |
 | `app/src/state.rs` | app state |
-| `app/src/theme.rs` | palette and terminal typography |
+| `app/src/theme.rs` | palette, bundled brand fonts, terminal typography |
+| `assets/fonts/` | JetBrains Mono and Space Grotesk, with their licences |
 | `app/src/fixture.rs` | sample data for `?demo` and screenshots |
 | `web/index.html` | the page: brand colours and a WebGPU check before the wasm loads |

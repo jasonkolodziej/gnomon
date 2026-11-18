@@ -38,7 +38,7 @@ case " $* " in
   *) cp web/index.html dist/index.html ;;
 esac
 cp ../assets/logo/png/gnomon-icon-64.png dist/favicon.png 2>/dev/null || true
-# Rune fetches the full Inter faces from beside app.js after the first frame. Its script finds
-# them through cargo's dep-info, which leaves out files of git dependencies, so copy them here.
-cp .rune/crates/rune/assets/web/Inter-*.ttf dist/
+# The brand fonts (JetBrains Mono, Space Grotesk) are compiled into the wasm (app/src/theme.rs);
+# the copies here are for the loading page's CSS.
+mkdir -p dist/fonts && cp assets/fonts/*.ttf dist/fonts/
 exec .rune/scripts/web-build.sh gnomon-ui --out dist "$@"
