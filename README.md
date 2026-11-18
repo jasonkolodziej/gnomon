@@ -33,6 +33,9 @@ proposed in [`docs/SLURM_Scheduler_Research_and_Rust_Design.md`](docs/SLURM_Sche
   cgroup and rootless Docker setup, and a reference for every binary.
 - **Architecture:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): diagrams of the deployment, crates,
   controller pipeline, job lifecycle, replication and node-side launch.
+- **Kubernetes:** [`docs/KUBERNETES.md`](docs/KUBERNETES.md): what Kubernetes does that Gnomon
+  doesn't, how the Kubernetes batch stack is catching up, and where Gnomon can still differentiate
+  (time-axis planning, coexisting through a scheduler bridge).
 
 ## Crates
 
