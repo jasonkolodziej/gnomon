@@ -43,6 +43,21 @@ snapshots draw the same faces: JetBrains Mono Medium throughout (Bold for emphas
 wordmark in Space Grotesk SemiBold, lowercase, tracked −2%. `SpaceGrotesk-SemiBold.ttf` is a static
 instance (wght 600) of the variable font from Google Fonts.
 
+## Install (optional)
+
+```sh
+brew install rustup
+export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+```
+
+Then reload the shell and check:
+
+```sh
+exec zsh
+which wasm-bindgen     # → ~/.cargo/bin/wasm-bindgen
+ui/build.sh && testkit/web-demo.sh start
+```
+
 ## Run it
 
 ```sh
