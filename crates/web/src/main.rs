@@ -61,11 +61,7 @@ async fn main() {
 
     let hub = Hub::new(!read_only);
     tokio::spawn(run_poller(addrs.clone(), hub.clone()));
-    let app = router(App {
-        hub,
-        addrs: addrs.clone(),
-        ui_dir: ui_dir.clone(),
-    });
+    let app = router(App::new(hub, addrs.clone(), ui_dir.clone()));
     let listener = match tokio::net::TcpListener::bind(&listen).await {
         Ok(l) => l,
         Err(e) => {

@@ -70,16 +70,30 @@ mod web {
                 Err(e) => log(&format!("gnomon: bad events message: {e}")),
             }
         });
+        let on_history = Closure::<dyn FnMut(MessageEvent)>::new(|m: MessageEvent| {
+            let Some(data) = m.data().as_string() else {
+                return;
+            };
+            match serde_json::from_str::<Vec<EventView>>(&data) {
+                Ok(v) => update(move |s| s.replace_events(v)),
+                Err(e) => log(&format!("gnomon: bad history message: {e}")),
+            }
+        });
+        let on_reset = Closure::<dyn FnMut(MessageEvent)>::new(|_| update(|s| s.reset_events()));
         let on_open = Closure::<dyn FnMut()>::new(|| update(|s| s.live = true));
         // EventSource reconnects by itself; the header shows the gap.
         let on_error = Closure::<dyn FnMut()>::new(|| update(|s| s.live = false));
         let _ = es.add_event_listener_with_callback("state", on_state.as_ref().unchecked_ref());
         let _ = es.add_event_listener_with_callback("events", on_events.as_ref().unchecked_ref());
+        let _ = es.add_event_listener_with_callback("history", on_history.as_ref().unchecked_ref());
+        let _ = es.add_event_listener_with_callback("reset", on_reset.as_ref().unchecked_ref());
         es.set_onopen(Some(on_open.as_ref().unchecked_ref()));
         es.set_onerror(Some(on_error.as_ref().unchecked_ref()));
         // The page lives as long as the app: the listeners do too.
         on_state.forget();
         on_events.forget();
+        on_history.forget();
+        on_reset.forget();
         on_open.forget();
         on_error.forget();
         std::mem::forget(es);

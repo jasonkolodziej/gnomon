@@ -113,6 +113,19 @@ impl State {
         self.view = Some(v);
     }
 
+    /// The server's retained history, sent first on every (re)connect: it
+    /// replaces the feed, so a history that restarted from a lower index is
+    /// not hidden behind the old high-water mark.
+    pub fn replace_events(&mut self, events: Vec<EventView>) {
+        self.events.clear();
+        self.push_events(events);
+    }
+
+    /// The controller's history changed: the next events start a new feed.
+    pub fn reset_events(&mut self) {
+        self.events.clear();
+    }
+
     pub fn push_events(&mut self, events: Vec<EventView>) {
         let last = self.events.back().map(|e| e.index);
         for e in events {
@@ -240,5 +253,22 @@ mod tests {
         s.push_events(vec![ev(2), ev(3)]);
         let idx: Vec<u64> = s.events.iter().map(|e| e.index).collect();
         assert_eq!(idx, [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_restarted_history_is_not_hidden_by_the_old_high_water_mark() {
+        let mut s = State::default();
+        let ev = |i| EventView {
+            index: i,
+            ..Default::default()
+        };
+        s.push_events(vec![ev(9_000), ev(10_000)]);
+        s.push_events(vec![ev(5)]);
+        assert_eq!(s.events.len(), 2, "live events keep the high-water mark");
+        s.reset_events();
+        s.push_events(vec![ev(5)]);
+        assert_eq!(s.events.back().map(|e| e.index), Some(5));
+        s.replace_events(vec![ev(1), ev(2)]);
+        assert_eq!(s.events.iter().map(|e| e.index).collect::<Vec<_>>(), [1, 2]);
     }
 }
