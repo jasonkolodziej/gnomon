@@ -50,6 +50,11 @@ jobs:
           workspaces: ui
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # The native build of the UI (used by its host tests) links Rune's
+      # Linux windowing stack, which needs libxkbcommon.
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+
       - name: Unit tests (host)
         working-directory: ui
         run: cargo test -p gnomon-ui --lib
