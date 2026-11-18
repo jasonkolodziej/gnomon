@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "gnomon-agent"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "gnomon-api",
@@ -1076,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "gnomon-api"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "gnomon-core",
  "gnomon-fsm",
@@ -1090,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "gnomon-cli"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "gnomon-consensus"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "bincode",
  "gnomon-core",
@@ -1114,7 +1114,7 @@ dependencies = [
 
 [[package]]
 name = "gnomon-core"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1122,7 +1122,7 @@ dependencies = [
 
 [[package]]
 name = "gnomon-ctl"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "gnomon-api",
  "gnomon-consensus",
@@ -1136,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "gnomon-fsm"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "gnomon-core",
  "gnomon-graph",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "gnomon-graph"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "gnomon-core",
  "serde",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "gnomon-policy"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "gnomon-core",
@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "gnomon-sched"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "gnomon-core",
  "gnomon-fsm",
@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "gnomon-sim"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "gnomon-core",
  "gnomon-fsm",
@@ -1190,7 +1190,7 @@ dependencies = [
 
 [[package]]
 name = "gnomon-top"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
