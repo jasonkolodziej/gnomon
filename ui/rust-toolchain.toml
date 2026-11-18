@@ -1,0 +1,5 @@
+# Rune (the UI framework) pins this toolchain; the rest of Gnomon builds on stable.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown"]

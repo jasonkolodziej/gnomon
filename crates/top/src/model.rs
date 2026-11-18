@@ -234,6 +234,7 @@ mod tests {
                 }),
                 last_heartbeat: 0,
                 alive: true,
+                kill_pending: vec![],
             }],
         };
         let s = ClusterSnapshot::from_replies(7, jobs, nodes);

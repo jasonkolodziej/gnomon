@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gnomon — UI not built</title>
+<style>
+  :root { --ink:#0A0D12; --slate:#1E293B; --teal:#14B8A6; --teal-light:#5EEAD4; --paper:#F8FAFC; }
+  body { margin:0; background:var(--ink); color:var(--paper);
+         font:15px/1.6 "JetBrains Mono","IBM Plex Mono",ui-monospace,monospace; }
+  main { max-width:760px; margin:10vh auto; padding:0 20px; }
+  h1 { font-size:20px; letter-spacing:.5px; color:var(--teal-light); margin:0 0 4px; }
+  .rule { color:#334155; }
+  pre { background:var(--slate); border:1px solid #334155; padding:14px; overflow-x:auto; color:var(--paper); }
+  a { color:var(--teal); }
+  .dim { color:#94A3B8; }
+</style>
+</head>
+<body>
+<main>
+<h1>▍gnomon web</h1>
+<div class="rule">────────────────────────────────────────────────────────────</div>
+<p>The server is running and following the controller, but the browser UI has not been
+built into <code>{UI_DIR}</code>.</p>
+<pre>ui/build.sh                       # Rust 1.99.1 + wasm32 + wasm-bindgen-cli 0.2.129
+gnomon-web --ui-dir ui/dist</pre>
+<p class="dim">The UI is a Rune app rendered with WebGPU (current Chrome, Edge or Safari;
+Firefox behind a flag). See <code>ui/README.md</code>.</p>
+<p>Meanwhile the JSON is live: <a href="/api/state">/api/state</a> ·
+<a href="/api/events">/api/events</a> · <a href="/api/stream">/api/stream</a> (SSE)</p>
+</main>
+</body>
+</html>

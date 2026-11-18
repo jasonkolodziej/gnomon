@@ -231,6 +231,22 @@ pub struct Fsm {
     journal: Option<Mutex<Vec<JournalEntry>>>,
     sink: OnceLock<Arc<dyn EventSink>>,
     proposer: OnceLock<Arc<dyn Proposer>>,
+    tail: OnceLock<Mutex<Tail>>,
+}
+
+/// One applied event as kept by the in-memory tail ([`Fsm::enable_tail`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TailEntry {
+    pub index: StateIndex,
+    pub entry: JournalEntry,
+    pub accepted: bool,
+}
+
+/// The last `cap` applied events, for live views (the API's `ListEvents`).
+#[derive(Debug)]
+struct Tail {
+    cap: usize,
+    entries: std::collections::VecDeque<TailEntry>,
 }
 
 impl Default for Fsm {
@@ -252,6 +268,7 @@ impl Fsm {
             journal: None,
             sink: OnceLock::new(),
             proposer: OnceLock::new(),
+            tail: OnceLock::new(),
         }
     }
 
@@ -273,6 +290,36 @@ impl Fsm {
     /// rejected and return it back). See [`Proposer`].
     pub fn set_proposer(&self, proposer: Arc<dyn Proposer>) -> Result<(), Arc<dyn Proposer>> {
         self.proposer.set(proposer)
+    }
+
+    /// Keep the last `cap` applied events in memory for live views
+    /// ([`Fsm::tail_after`]). Off by default, so the simulator and replay pay
+    /// nothing; the controller turns it on. Returns false if already on.
+    pub fn enable_tail(&self, cap: usize) -> bool {
+        self.tail
+            .set(Mutex::new(Tail {
+                cap: cap.max(1),
+                entries: std::collections::VecDeque::new(),
+            }))
+            .is_ok()
+    }
+
+    /// Up to `limit` tail entries with an index above `after`, oldest first,
+    /// and the oldest index the tail still holds (`None` when the tail is
+    /// off or empty).
+    pub fn tail_after(
+        &self,
+        after: StateIndex,
+        limit: usize,
+    ) -> (Vec<TailEntry>, Option<StateIndex>) {
+        let Some(t) = self.tail.get() else {
+            return (Vec::new(), None);
+        };
+        let t = t.lock().unwrap();
+        let first = t.entries.front().map(|e| e.index);
+        let start = t.entries.partition_point(|e| e.index <= after);
+        let out = t.entries.iter().skip(start).take(limit).cloned().collect();
+        (out, first)
     }
 
     /// Whether writes go through a [`Proposer`] (replicated controller).
@@ -398,6 +445,18 @@ impl Fsm {
         }
         let accepted = apply_event(&mut st, &ev, expect, now);
         let index = self.index.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Some(t) = self.tail.get() {
+            // Under the state write lock, so the tail is in index order.
+            let mut t = t.lock().unwrap();
+            if t.entries.len() == t.cap {
+                t.entries.pop_front();
+            }
+            t.entries.push_back(TailEntry {
+                index,
+                entry: JournalEntry { at: now, event: ev },
+                accepted,
+            });
+        }
         Applied { index, accepted }
     }
 
@@ -1173,6 +1232,26 @@ mod tests {
         assert!(fsm.try_apply(ev.clone()).is_err());
         assert!(!fsm.apply_checked(ev).accepted);
         assert_eq!(fsm.index(), 0);
+    }
+
+    #[test]
+    fn tail_keeps_the_last_events_in_index_order_when_enabled() {
+        let (_c, fsm) = setup();
+        assert_eq!(fsm.tail_after(0, 10), (vec![], None), "off by default");
+        assert!(fsm.enable_tail(3));
+        assert!(!fsm.enable_tail(3));
+        for id in 1..=4 {
+            fsm.apply(Event::JobSubmitted(job(id, 1, 10)));
+        }
+        fsm.apply(Event::JobSubmitted(job(1, 1, 10))); // duplicate id: rejected
+        let (all, first) = fsm.tail_after(0, 10);
+        let idx: Vec<_> = all.iter().map(|e| e.index).collect();
+        assert_eq!(idx, [4, 5, 6], "capped at 3, oldest dropped");
+        assert_eq!(first, Some(4));
+        assert!(!all[2].accepted);
+        let (after5, _) = fsm.tail_after(5, 10);
+        assert_eq!(after5.len(), 1);
+        assert_eq!(fsm.tail_after(4, 1).0[0].index, 5, "limit");
     }
 
     #[derive(Default)]

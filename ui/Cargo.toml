@@ -1,0 +1,26 @@
+# The Gnomon web UI: a Rune app compiled to WebAssembly. A workspace of its own,
+# separate from the scheduler's, because Rune pins Rust 1.99.1 (edition 2024) and
+# needs the crate patches below; see README.md.
+[workspace]
+resolver = "3"
+members = ["app"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "3ef98871fb72307872d44995777c543028d3bc50", default-features = false, features = ["svg"] }
+
+# Rune builds against patched copies of these crates and asks apps to patch them too
+# ("a dependency's [patch] doesn't apply to the workspace that depends on it").
+# Taken from the same Rune revision. (Rune also patches accesskit_windows and
+# accesskit_macos; those are native-only and not in this web build.)
+[patch.crates-io]
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "3ef98871fb72307872d44995777c543028d3bc50" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "3ef98871fb72307872d44995777c543028d3bc50" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "3ef98871fb72307872d44995777c543028d3bc50" }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"

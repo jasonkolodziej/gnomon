@@ -17,7 +17,8 @@
 //! run the same policy.
 
 use super::flag;
-use gnomon_api::SubmitPolicy;
+use gnomon_api::pb::{PluginStatus, PolicyStatusReply};
+use gnomon_api::{PolicyReport, SubmitPolicy};
 use gnomon_core::Job;
 use gnomon_policy::{
     AdmissionHook, AdmissionPlugin, EstimatorPlugin, FailMode, NodeScorePlugin, PluginLimits,
@@ -38,6 +39,98 @@ pub struct Plugins {
     pub policy: Arc<dyn Policy>,
     /// One line per configured piece, for the startup log.
     pub summary: Vec<String>,
+    /// Live counters of every configured piece, for `PolicyStatus`.
+    pub report: Arc<PluginReport>,
+}
+
+/// Shared handles on every configured hook, so `PolicyStatus` reports their
+/// live counters (the hooks themselves count every call).
+pub struct PluginReport {
+    policy: Arc<dyn Policy>,
+    limits: PluginLimits,
+    admission: Option<(Arc<AdmissionHook>, String)>,
+    priority: Option<(Arc<PriorityHook>, Option<String>)>,
+    shadow: Option<(Arc<ShadowPriority>, String)>,
+    estimator: Option<(Arc<WasmEstimator>, String)>,
+    node_score: Option<(Arc<ScoredPolicy>, String)>,
+}
+
+fn status(world: &str, source: &str, mode: String, counters: &[(&str, u64)]) -> PluginStatus {
+    PluginStatus {
+        world: world.into(),
+        source: source.into(),
+        mode,
+        counters: counters.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+    }
+}
+
+impl PolicyReport for PluginReport {
+    fn status(&self) -> PolicyStatusReply {
+        let n = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
+        let mut plugins = Vec::new();
+        if let Some((a, path)) = &self.admission {
+            plugins.push(status(
+                "admission",
+                path,
+                format!("fail {}", format!("{:?}", a.fail).to_lowercase()),
+                &[
+                    ("calls", n(&a.calls)),
+                    ("failures", n(&a.failures)),
+                    ("rejected", n(&a.rejected)),
+                    ("rewritten", n(&a.rewritten)),
+                ],
+            ));
+        }
+        if let Some((p, path)) = &self.priority {
+            let (world, source) = match path {
+                Some(path) => ("priority", path.as_str()),
+                None => ("declarative", "declarative"),
+            };
+            plugins.push(status(
+                world,
+                source,
+                format!("fallback qos {}", p.fallback_qos),
+                &[("calls", n(&p.calls)), ("failures", n(&p.failures))],
+            ));
+        }
+        if let Some((s, path)) = &self.shadow {
+            plugins.push(status(
+                "shadow-priority",
+                path,
+                "compared, never applied".into(),
+                &[
+                    ("compared", n(&s.compared)),
+                    ("differed", n(&s.differed)),
+                    ("failures", n(&s.failures)),
+                ],
+            ));
+        }
+        if let Some((e, path)) = &self.estimator {
+            plugins.push(status(
+                "estimator",
+                path,
+                "walltime fallback".into(),
+                &[("calls", n(&e.calls)), ("failures", n(&e.failures))],
+            ));
+        }
+        if let Some((p, path)) = &self.node_score {
+            let cap = p
+                .max_candidates
+                .map_or("all".to_string(), |c| c.to_string());
+            plugins.push(status(
+                "node-score",
+                path,
+                format!("{cap} candidates per call"),
+                &[("calls", n(&p.calls)), ("failures", n(&p.failures))],
+            ));
+        }
+        PolicyStatusReply {
+            policy: self.policy.name(),
+            plugins,
+            fuel: self.limits.fuel,
+            memory_mb: (self.limits.max_memory_bytes >> 20) as u64,
+        }
+    }
 }
 
 /// Load everything the flags and environment ask for.
@@ -56,7 +149,7 @@ pub fn load(args: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Plu
             let p = AdmissionPlugin::from_file(&path, limits)
                 .map_err(|e| format!("--admission-plugin {path}: {e}"))?;
             summary.push(format!("admission plugin {path} (fail {fail:?})"));
-            Some(AdmissionHook::new(p, fail))
+            Some((Arc::new(AdmissionHook::new(p, fail)), path))
         }
         None => None,
     };
@@ -84,7 +177,10 @@ pub fn load(args: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Plu
             Some(path) => format!("priority plugin {path} (declarative fallback)"),
             None => "declarative priority".into(),
         });
-        Some(PriorityHook::new(plugin, fallback))
+        Some((
+            Arc::new(PriorityHook::new(plugin, fallback)),
+            priority_path.clone(),
+        ))
     } else {
         None
     };
@@ -96,7 +192,7 @@ pub fn load(args: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Plu
             summary.push(format!(
                 "shadow priority plugin {path} (compared, not applied)"
             ));
-            Some(ShadowPriority::new(p))
+            Some((Arc::new(ShadowPriority::new(p)), path))
         }
         None => None,
     };
@@ -106,7 +202,7 @@ pub fn load(args: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Plu
             let p = EstimatorPlugin::from_file(&path, limits)
                 .map_err(|e| format!("--estimator-plugin {path}: {e}"))?;
             summary.push(format!("estimator plugin {path} (walltime fallback)"));
-            Some(Arc::new(WasmEstimator::new(p)))
+            Some((Arc::new(WasmEstimator::new(p)), path))
         }
         None => None,
     };
@@ -126,32 +222,44 @@ pub fn load(args: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Plu
             summary.push(format!(
                 "node-score plugin {path} ({shown} candidates per call, default placement fallback)"
             ));
-            Some((p, cap))
+            Some((p, cap, path))
         }
         None => None,
     };
 
-    let backfill = match estimator {
-        Some(e) => BackfillPolicy::with_estimator(WINDOW_SECS, e),
+    let backfill = match &estimator {
+        Some((e, _)) => BackfillPolicy::with_estimator(WINDOW_SECS, e.clone()),
         None => BackfillPolicy::new(WINDOW_SECS),
     };
-    let policy: Arc<dyn Policy> = match node_score {
-        Some((p, cap)) => {
-            Arc::new(ScoredPolicy::new(Arc::new(backfill), p).with_max_candidates(cap))
+    let (policy, node_score): (Arc<dyn Policy>, _) = match node_score {
+        Some((p, cap, path)) => {
+            let scored =
+                Arc::new(ScoredPolicy::new(Arc::new(backfill), p).with_max_candidates(cap));
+            (scored.clone(), Some((scored, path)))
         }
-        None => Arc::new(backfill),
+        None => (Arc::new(backfill), None),
     };
     let submit = (admission.is_some() || priority.is_some() || shadow.is_some()).then(|| {
         Arc::new(SubmitChain {
-            admission,
-            priority,
-            shadow,
+            admission: admission.as_ref().map(|(a, _)| a.clone()),
+            priority: priority.as_ref().map(|(p, _)| p.clone()),
+            shadow: shadow.as_ref().map(|(s, _)| s.clone()),
         }) as Arc<dyn SubmitPolicy>
+    });
+    let report = Arc::new(PluginReport {
+        policy: policy.clone(),
+        limits,
+        admission,
+        priority,
+        shadow,
+        estimator,
+        node_score,
     });
     Ok(Plugins {
         submit,
         policy,
         summary,
+        report,
     })
 }
 
@@ -183,9 +291,9 @@ fn limits(args: &[String], env: &impl Fn(&str) -> Option<String>) -> Result<Plug
 /// then priority, then the shadow comparison. Plugin failures are logged
 /// with running counts; the fallbacks decide.
 struct SubmitChain {
-    admission: Option<AdmissionHook>,
-    priority: Option<PriorityHook>,
-    shadow: Option<ShadowPriority>,
+    admission: Option<Arc<AdmissionHook>>,
+    priority: Option<Arc<PriorityHook>>,
+    shadow: Option<Arc<ShadowPriority>>,
 }
 
 impl SubmitPolicy for SubmitChain {
@@ -365,6 +473,8 @@ mod tests {
             fsm: Arc::new(Fsm::new()),
             broker: Arc::new(EvalBroker::new()),
             submit_policy: submit,
+            cluster: None,
+            policy_report: None,
         }
     }
 
@@ -430,6 +540,25 @@ mod tests {
         let err = submit(&s, 64, 0, 2).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert!(err.message().contains("too many cores"));
+
+        // PolicyStatus reports the live counters of every configured world.
+        let st = p.report.status();
+        let world = |w: &str| st.plugins.iter().find(|x| x.world == w).unwrap();
+        let admission = world("admission");
+        assert_eq!(admission.counters["calls"], 3);
+        assert_eq!(admission.counters["rejected"], 1);
+        assert_eq!(admission.counters["rewritten"], 1);
+        assert_eq!(admission.mode, "fail open");
+        assert!(admission.source.ends_with("admission.wat"));
+        assert_eq!(world("priority").counters["calls"], 2);
+        let shadow = world("shadow-priority");
+        assert_eq!(shadow.counters["compared"], 2);
+        assert_eq!(
+            shadow.counters["failures"], 2,
+            "the trapping shadow fails, harmlessly"
+        );
+        assert_eq!(st.policy, "backfill/walltime");
+        assert!(st.fuel > 0 && st.memory_mb > 0);
     }
 
     #[tokio::test]

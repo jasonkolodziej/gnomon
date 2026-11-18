@@ -1,0 +1,22 @@
+[package]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+name = "gnomon-web"
+description = "Web server for the Gnomon UI: serves the Rune WASM app, bridges the controllers' gRPC API to JSON and Server-Sent Events, and runs policy-lab simulations"
+
+[[bin]]
+name = "gnomon-web"
+path = "src/main.rs"
+
+[dependencies]
+gnomon-api = { path = "../api" }
+gnomon-core = { path = "../core" }
+gnomon-sched = { path = "../sched" }
+gnomon-sim = { path = "../sim" }
+gnomon-web-model = { path = "../web-model" }
+axum = "0.7"
+futures-util = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
