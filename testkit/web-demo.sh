@@ -74,7 +74,10 @@ load() {
       7) submit -J "solver-$n" -c 4 -N 3 -t 600 "$dir/jobs/fail-rank0.sh" ;;
       8) submit -J "analysis-$n" -c 8 -t 1800 "$s" $((300 + RANDOM % 600)) ;;
       10) # cancel the oldest running single-node job now and then
-          id=$(GNOMON_ADDR=$addrs "$B/gnqueue" 2>/dev/null | awk '$3 == "RUNNING" && $6 == 1 {print $1; exit}')
+          # awk reads to the end (no early exit, so gnqueue never hits a closed
+          # pipe) and a failed query (mid-failover) just skips this round.
+          id=$( { GNOMON_ADDR=$addrs "$B/gnqueue" 2>/dev/null || true; } |
+                awk '$3 == "RUNNING" && $6 == 1 && !found {print $1; found = 1}' ) || id=""
           if [ -n "${id:-}" ]; then
             GNOMON_ADDR=$addrs "$B/gncancel" "$id" >> "$dir/load.log" 2>&1 || true
           fi ;;
