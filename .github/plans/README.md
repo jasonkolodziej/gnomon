@@ -50,3 +50,4 @@ What are the resulting trade-offs, follow-up tasks, or risks?
 | [0002](./0002-wasm-policy-plugins.md) | Sandboxed WASM plugins for scheduling policy | Accepted | 2026-11-17 |
 | [0003](./0003-admission-plugins.md) | Admission plugins that can reject or rewrite jobs | Accepted | 2026-11-17 |
 | [0004](./0004-node-score-plugins.md) | Node-score plugins choose where, never when | Accepted | 2026-11-17 |
+| [0005](./0005-web-ui.md) | A Rune web UI over a server-side bridge | Accepted | 2026-11-18 |

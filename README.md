@@ -49,6 +49,8 @@ proposed in [`docs/SLURM_Scheduler_Research_and_Rust_Design.md`](docs/SLURM_Sche
 | `gnomon-agent` | Node agent: real /proc + GPU probing, registration, heartbeats, job launch in cgroup v2 or rootless containers, **kill channel** (gang peers, running-job cancel), controller failover | 4.6 |
 | `gnomon-cli` | **Slurm-compatible shims**: `gnbatch` (parses #SBATCH), `gnqueue`, `gncancel` (also kills running jobs), `gninfo`; `GNOMON_ADDR` may list every controller | 4.5 |
 | `gnomon-top` | **`gntop`**: `top`-like live Gantt chart of the cluster plan (running spans + backfill reservations per node) | 4.2, 5.2 |
+| `gnomon-web` | **Web UI server**: serves the Rune app in [`ui/`](ui/README.md), bridges the controllers' gRPC to JSON and Server-Sent Events (cluster, policy plugins, events, jobs, nodes), submit/cancel, policy lab | — |
+| `gnomon-web-model` | JSON types shared by `gnomon-web` and the browser UI (serde only) | — |
 | `gnomon-sim` | **Exact replay**, counterfactual policy evaluation on recorded history, SWF trace simulator, metrics | 6.3 |
 
 ## What's new in this iteration
@@ -137,6 +139,7 @@ and a 3-node Gnomon built from identical containers, adding multi-node tests t08
 | [`host-validation.yml`](.github/workflows/host-validation.yml) | agent/API/proto changes, push to `main`, weekly | `testkit/validate-host.sh` on Ubuntu 24.04 (cgroup v2): job confinement against the real kernel and real Docker and Podman (matrix) |
 | [`audit.yml`](.github/workflows/audit.yml) | `Cargo.toml`/`Cargo.lock` changes, weekly | `cargo audit` against the RustSec advisory database |
 | [`release.yml`](.github/workflows/release.yml) | tag `v*` (manual: dry run for a tag) | Checks the tag matches the workspace version, builds and smoke-tests tarballs for x86_64/aarch64 Linux and aarch64 macOS, pushes `ghcr.io/<owner>/gnomon-{ctl,agent,cli}` (amd64 + arm64), publishes a GitHub release with `SHA256SUMS` |
+| [`web-ui.yml`](.github/workflows/web-ui.yml) | `ui/`, `crates/web*`, proto changes; push to `main` | Builds the Rune web UI to WebAssembly on its pinned toolchain, runs its unit tests, uploads `ui/dist` |
 | [`ci.yml`](.github/workflows/ci.yml) | push to `main`, pull requests | YAML validation and secret-pattern scan |
 | [`graphify.yml`](.github/workflows/graphify.yml) | push to `main`, pull requests | Rebuilds the knowledge graph of the Rust crates and `testkit/` (see [GRAPHIFY.md](GRAPHIFY.md)) |
 
@@ -285,6 +288,29 @@ output, without ever being host root:
 
 Rootless Docker is detected once at start-up from `docker info`; `GNOMON_CONTAINER_ROOTLESS=1`/`0`
 overrides the detection.
+
+### Web UI: everything, live, in the browser
+
+```sh
+ui/build.sh && testkit/web-demo.sh start     # 3 Raft controllers, every WASM plugin world, 6 agents, load
+# open http://127.0.0.1:8080 · testkit/web-demo.sh failover kills the leader · …/?demo shows sample data
+```
+
+[`ui/`](ui/README.md) is a terminal-styled [Rune](https://github.com/anomalyco/rune) app (Rust →
+WebAssembly, drawn with WebGPU) in the brand palette, served by `gnomon-web`. Seven views, on keys
+`1`-`7`:
+- **timeline:** every node's planner, with running spans, backfill reservations and the queue
+- **nodes:** capacity in use, ranks, and the kill channel
+- **queue:** job detail, cancel and a new-job form
+- **cluster:** the Raft group and replication progress
+- **policy:** the admission → priority (+ shadow) and estimator → backfill → node-score plugin
+  pipeline, with live counters
+- **events:** the state machine's event feed
+- **lab:** walltime backfill, runtime quantile, bias-corrected and wide-job-shield policies on one
+  workload, run with the production code
+
+`gnomon-web` binds to localhost by default (the API has no authentication); `--read-only` disables
+submit and cancel. Design: [ADR 0005](.github/plans/0005-web-ui.md).
 
 ### `gntop`: the time axis, live
 

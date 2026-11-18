@@ -40,13 +40,15 @@ impl Rng {
 }
 
 /// Jobs that overestimate their walltime (as real users do: actual runtime
-/// 5-100% of it), arriving every 2-10 minutes, some of them gangs.
+/// 5-100% of it), some of them gangs, arriving every 1-5 minutes: on the
+/// default 16x16 machine that is roughly 90% load, where backfill policies
+/// differ (an idle machine schedules everything at once under any policy).
 pub fn workload(r: &LabRequest) -> Vec<SimJob> {
     let mut rng = Rng(r.seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
     let mut t = 10_000;
     (0..u64::from(r.jobs))
         .map(|i| {
-            t += 120 + rng.next() % 480;
+            t += 60 + rng.next() % 260;
             let wall = 600 + rng.next() % 14_400;
             let actual = (wall * (5 + rng.next() % 96) / 100).max(1);
             let cores = 1 + (rng.next() % u64::from(r.cores_per_node)) as u32;

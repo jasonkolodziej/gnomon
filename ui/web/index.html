@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0B1220">
+<title>gnomon</title>
+<link rel="icon" href="favicon.png">
+<style>
+  html,body{margin:0;width:100%;height:100%;overflow:hidden;overscroll-behavior:none;touch-action:none;background:#0B1220}
+  #status{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;
+          font:14px/1.6 "JetBrains Mono","IBM Plex Mono",ui-monospace,monospace;color:#94A3B8;text-align:center;padding:24px}
+  #status b{color:#5EEAD4;font-size:18px} #status b i{color:#14B8A6;font-style:normal}
+  #status a{color:#14B8A6}
+</style>
+<div id="status"><b><i>▍</i>gnomon</b><span id="msg">loading…</span></div>
+<script type="module">
+import init from './app.js';
+const msg = document.querySelector('#msg');
+try {
+    if (!navigator.gpu) throw new Error('This UI renders with WebGPU: use a current Chrome, Edge or Safari ' +
+        '(Firefox: enable dom.webgpu.enabled), over HTTPS or on localhost. The JSON is still at /api/state.');
+    await init();
+    document.querySelector('#status').remove();
+} catch (error) {
+    msg.textContent = String(error.message || error);
+    console.error(error);
+}
+</script>
+</html>

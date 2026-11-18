@@ -1,0 +1,65 @@
+name: Web UI
+
+# Builds the Rune web UI (ui/, its own workspace on Rust 1.99.1, see ui/README.md) to WebAssembly
+# and runs its unit tests. gnomon-web itself is tested with the rest of the workspace (rust.yml).
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - "ui/**"
+      - "crates/web/**"
+      - "crates/web-model/**"
+      - "proto/**"
+      - ".github/workflows/web-ui.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: Build (wasm32) and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain (ui/rust-toolchain.toml)
+        working-directory: ui
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install wasm-bindgen-cli 0.2.129
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ui
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Unit tests (host)
+        working-directory: ui
+        run: cargo test -p gnomon-ui --lib
+
+      - name: Build the UI
+        run: ui/build.sh
+
+      - name: Upload ui/dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: gnomon-ui-dist
+          path: ui/dist
+          retention-days: 14
