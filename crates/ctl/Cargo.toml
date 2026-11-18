@@ -11,5 +11,6 @@ gnomon-sched = { path = "../sched" }
 gnomon-policy = { path = "../policy" }
 gnomon-api = { path = "../api" }
 gnomon-consensus = { path = "../consensus" }
+openraft = { version = "0.9", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }
 tonic = "0.12"

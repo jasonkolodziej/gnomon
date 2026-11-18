@@ -13,6 +13,12 @@ service Scheduler {
   rpc ReportCompletion(ReportCompletionRequest) returns (ReportCompletionReply);
   // Gang release barrier: a rank may start once every rank has been fetched.
   rpc GangReady(GangReadyRequest) returns (GangReadyReply);
+  // Controller status: standalone, or this replica's view of its Raft group.
+  rpc ClusterStatus(ClusterStatusRequest) returns (ClusterStatusReply);
+  // Scheduling policy in force: the WASM plugin worlds and their counters (ADR 0002-0004).
+  rpc PolicyStatus(PolicyStatusRequest) returns (PolicyStatusReply);
+  // Recent state-machine events after an index; waits up to wait_ms for one (like GetJob).
+  rpc ListEvents(ListEventsRequest) returns (ListEventsReply);
 }
 
 message Resources { uint32 cores = 1; uint64 mem_mb = 2; uint32 gpus = 3; }
@@ -52,6 +58,8 @@ message JobInfo {
 message NodeInfo {
   string name = 1; Resources capacity = 2; Resources allocated = 3;
   uint64 last_heartbeat = 4; bool alive = 5;
+  // Jobs whose rank on this node is on the kill channel (not yet reported).
+  repeated uint64 kill_pending = 6;
 }
 
 message RegisterNodeRequest { string name = 1; Resources capacity = 2; }
@@ -86,4 +94,59 @@ message GangReadyReply {
   bool active = 2;
   uint32 fetched = 3;
   uint32 nodes = 4;
+}
+
+message ClusterStatusRequest {}
+message ClusterMember {
+  uint64 id = 1; string addr = 2; bool leader = 3;
+  // Leader's view of the last log index replicated to this member.
+  bool has_matched = 4; uint64 matched_index = 5;
+}
+message ClusterStatusReply {
+  // False for a standalone controller (no Raft); the other fields then describe it alone.
+  bool replicated = 1;
+  uint64 node_id = 2;
+  // standalone, leader, follower, candidate or learner.
+  string role = 3;
+  bool has_leader = 4; uint64 leader_id = 5;
+  uint64 term = 6; uint64 last_log_index = 7; uint64 last_applied = 8;
+  // The FSM's own state index (what ListJobs reports as state_index).
+  uint64 fsm_index = 9;
+  repeated ClusterMember members = 10;
+}
+
+message PolicyStatusRequest {}
+message PluginStatus {
+  // admission, priority, shadow-priority, estimator, node-score or declarative.
+  string world = 1;
+  // Component path, or "declarative" for the JSON policy config.
+  string source = 2;
+  // Human-readable configuration, e.g. "fail open" or "64 candidates".
+  string mode = 3;
+  map<string, uint64> counters = 4;
+}
+message PolicyStatusReply {
+  // Name of the scheduling policy (Policy::name()).
+  string policy = 1;
+  repeated PluginStatus plugins = 2;
+  // Per-call sandbox limits.
+  uint64 fuel = 3; uint64 memory_mb = 4;
+}
+
+message ListEventsRequest { uint64 after_index = 1; uint32 limit = 2; uint32 wait_ms = 3; }
+message EventInfo {
+  uint64 index = 1; uint64 at = 2;
+  // JobSubmitted, JobStarted, ... (the Event variant).
+  string kind = 3;
+  bool has_job = 4; uint64 job_id = 5;
+  string node = 6;
+  string detail = 7;
+  // False when the FSM applied the event without effect (e.g. a conflicting plan).
+  bool accepted = 8;
+}
+message ListEventsReply {
+  repeated EventInfo events = 1;
+  // Oldest index still held (older events have been dropped from the in-memory tail).
+  uint64 first_available = 2;
+  uint64 last_index = 3;
 }

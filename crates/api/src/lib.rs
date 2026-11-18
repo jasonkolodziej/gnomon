@@ -33,6 +33,154 @@ pub struct SchedulerSvc {
     /// Controller-side submit policy: admission and priority (ADR 0002,
     /// 0003). `None` accepts every job with the priority the client sent.
     pub submit_policy: Option<Arc<dyn SubmitPolicy>>,
+    /// Raft status for `ClusterStatus`; `None` reports a standalone controller.
+    pub cluster: Option<Arc<dyn ClusterReport>>,
+    /// Policy and plugin counters for `PolicyStatus`; `None` reports the
+    /// default walltime backfill with no plugins.
+    pub policy_report: Option<Arc<dyn PolicyReport>>,
+}
+
+/// This replica's view of its Raft group (`gnomon-ctl` implements it from
+/// openraft's metrics, so this crate does not depend on the consensus crate).
+pub trait ClusterReport: Send + Sync {
+    fn status(&self) -> ClusterStatusReply;
+}
+
+/// The scheduling policy and the WASM plugins in force, with their counters.
+pub trait PolicyReport: Send + Sync {
+    fn status(&self) -> PolicyStatusReply;
+}
+
+/// Most events `ListEvents` returns per call.
+const MAX_EVENTS: usize = 1000;
+
+/// One state-machine event, as the event feed shows it.
+fn event_info(t: &gnomon_fsm::TailEntry) -> EventInfo {
+    let (kind, job, node, detail): (&str, Option<JobId>, String, String) = match &t.entry.event {
+        Event::JobSubmitted(j) => (
+            "JobSubmitted",
+            Some(j.id),
+            String::new(),
+            format!(
+                "{} by {}: {}c {}MB {}g x{} node(s), {}s, prio {}{}",
+                j.name,
+                j.user,
+                j.request.cores,
+                j.request.mem_mb,
+                j.request.gpus,
+                j.node_count(),
+                j.walltime.secs(),
+                j.priority,
+                j.container
+                    .as_deref()
+                    .map(|c| format!(", image {c}"))
+                    .unwrap_or_default()
+            ),
+        ),
+        Event::JobCancelled(id) => ("JobCancelled", Some(*id), String::new(), String::new()),
+        Event::JobStarted {
+            job,
+            vertices,
+            start,
+            dur,
+        } => (
+            "JobStarted",
+            Some(*job),
+            String::new(),
+            format!(
+                "vertices {vertices:?} at {start}{}",
+                dur.map(|d| format!(", span {d}s")).unwrap_or_default()
+            ),
+        ),
+        Event::JobReserved {
+            job,
+            vertices,
+            start,
+            dur,
+        } => (
+            "JobReserved",
+            Some(*job),
+            String::new(),
+            format!(
+                "vertices {vertices:?} from {start}{}",
+                dur.map(|d| format!(", span {d}s")).unwrap_or_default()
+            ),
+        ),
+        Event::JobFinished { job, end, code } => (
+            "JobFinished",
+            Some(*job),
+            String::new(),
+            format!("exit {code} at {end}"),
+        ),
+        Event::JobRankFinished {
+            job,
+            node,
+            end,
+            code,
+        } => (
+            "JobRankFinished",
+            Some(*job),
+            node.clone(),
+            format!("exit {code} at {end}"),
+        ),
+        Event::JobExtended { job, new_end } => (
+            "JobExtended",
+            Some(*job),
+            String::new(),
+            format!("planned end now {new_end}"),
+        ),
+        Event::ReservationsCleared { .. } => (
+            "ReservationsCleared",
+            None,
+            String::new(),
+            "re-planning reservations".into(),
+        ),
+        Event::NodeRegistered { name, capacity } => (
+            "NodeRegistered",
+            None,
+            name.clone(),
+            format!(
+                "{}c {}MB {}g",
+                capacity.cores, capacity.mem_mb, capacity.gpus
+            ),
+        ),
+        Event::AssignmentsFetched { node, count, .. } => (
+            "AssignmentsFetched",
+            None,
+            node.clone(),
+            format!("{count} assignment(s)"),
+        ),
+        Event::NodeProfileSet { name, profile } => (
+            "NodeProfileSet",
+            None,
+            name.clone(),
+            if profile.is_some() {
+                "capacity profile set".into()
+            } else {
+                "capacity profile cleared".into()
+            },
+        ),
+        Event::Heartbeat { name, .. } => ("Heartbeat", None, name.clone(), String::new()),
+        Event::NodeLost {
+            name,
+            last_heartbeat,
+        } => (
+            "NodeLost",
+            None,
+            name.clone(),
+            format!("no heartbeat since {last_heartbeat}"),
+        ),
+    };
+    EventInfo {
+        index: t.index,
+        at: t.entry.at,
+        kind: kind.into(),
+        has_job: job.is_some(),
+        job_id: job.map_or(0, |j| j.0),
+        node,
+        detail,
+        accepted: t.accepted,
+    }
 }
 
 /// Runs on the controller for every submission, before the `JobSubmitted`
@@ -234,6 +382,7 @@ impl Scheduler for SchedulerSvc {
                     gpus: n.allocated.gpus,
                 }),
                 last_heartbeat: n.last_heartbeat,
+                kill_pending: snap.state().kills_for(&n.name).map(|j| j.0).collect(),
                 // The replicated loss decision, so `gninfo` agrees with
                 // placement and with the configurable node timeout.
                 alive: !n.down,
@@ -391,6 +540,63 @@ impl Scheduler for SchedulerSvc {
         Ok(Response::new(reply))
     }
 
+    async fn cluster_status(
+        &self,
+        _req: Request<ClusterStatusRequest>,
+    ) -> Result<Response<ClusterStatusReply>, Status> {
+        let mut reply = match &self.cluster {
+            Some(c) => c.status(),
+            None => ClusterStatusReply {
+                replicated: false,
+                role: "standalone".into(),
+                ..Default::default()
+            },
+        };
+        reply.fsm_index = self.fsm.index();
+        Ok(Response::new(reply))
+    }
+
+    async fn policy_status(
+        &self,
+        _req: Request<PolicyStatusRequest>,
+    ) -> Result<Response<PolicyStatusReply>, Status> {
+        Ok(Response::new(match &self.policy_report {
+            Some(p) => p.status(),
+            None => PolicyStatusReply {
+                policy: "backfill/walltime".into(),
+                ..Default::default()
+            },
+        }))
+    }
+
+    /// Long-poll over the FSM's in-memory event tail: returns at once when
+    /// events above `after_index` exist, else waits up to `wait_ms` (capped
+    /// at 30 s). An empty reply with `first_available` above `after_index + 1`
+    /// means the caller fell behind the tail and missed events.
+    async fn list_events(
+        &self,
+        req: Request<ListEventsRequest>,
+    ) -> Result<Response<ListEventsReply>, Status> {
+        let r = req.into_inner();
+        let limit = match r.limit {
+            0 => MAX_EVENTS,
+            n => (n as usize).min(MAX_EVENTS),
+        };
+        let deadline =
+            std::time::Instant::now() + Duration::from_millis(u64::from(r.wait_ms).min(30_000));
+        loop {
+            let (events, first) = self.fsm.tail_after(r.after_index, limit);
+            if !events.is_empty() || std::time::Instant::now() >= deadline {
+                return Ok(Response::new(ListEventsReply {
+                    events: events.iter().map(event_info).collect(),
+                    first_available: first.unwrap_or(0),
+                    last_index: self.fsm.index(),
+                }));
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     async fn report_completion(
         &self,
         req: Request<ReportCompletionRequest>,
@@ -441,6 +647,8 @@ mod tests {
             fsm: Arc::new(Fsm::recording(Arc::new(SystemClock))),
             broker: Arc::new(EvalBroker::new()),
             submit_policy: None,
+            cluster: None,
+            policy_report: None,
         }
     }
 
@@ -684,6 +892,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_rpcs_describe_a_standalone_controller_by_default() {
+        let s = svc();
+        let c = s
+            .cluster_status(Request::new(ClusterStatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!c.replicated);
+        assert_eq!(c.role, "standalone");
+        assert_eq!(c.fsm_index, s.fsm.index());
+        let p = s
+            .policy_status(Request::new(PolicyStatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(p.policy, "backfill/walltime");
+        assert!(p.plugins.is_empty());
+    }
+
+    async fn events(s: &SchedulerSvc, after: u64, wait_ms: u32) -> ListEventsReply {
+        s.list_events(Request::new(ListEventsRequest {
+            after_index: after,
+            limit: 0,
+            wait_ms,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+    }
+
+    #[tokio::test]
+    async fn list_events_returns_the_tail_and_long_polls_for_more() {
+        let s = svc();
+        assert!(
+            events(&s, 0, 0).await.events.is_empty(),
+            "tail off: nothing"
+        );
+        s.fsm.enable_tail(100);
+        register(&s, "a").await;
+        let id = submit(&s, 1).await;
+        let got = events(&s, 0, 0).await;
+        let kinds: Vec<_> = got.events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["NodeRegistered", "JobSubmitted"]);
+        assert_eq!(got.events[0].node, "a");
+        assert!(got.events[1].has_job && got.events[1].job_id == id);
+        assert!(
+            got.events[1].detail.contains("mpi by u"),
+            "{}",
+            got.events[1].detail
+        );
+        assert_eq!(got.last_index, s.fsm.index());
+        // Nothing new: an empty reply after the wait.
+        let t0 = std::time::Instant::now();
+        assert!(events(&s, got.last_index, 100).await.events.is_empty());
+        assert!(t0.elapsed() >= Duration::from_millis(100));
+        // A write during the wait ends it early.
+        let fsm = s.fsm.clone();
+        let last = got.last_index;
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            fsm.apply(Event::JobCancelled(JobId(id)));
+        });
+        let next = events(&s, last, 5_000).await;
+        writer.await.unwrap();
+        assert_eq!(next.events.len(), 1);
+        assert_eq!(next.events[0].kind, "JobCancelled");
+    }
+
+    #[tokio::test]
+    async fn list_nodes_shows_ranks_waiting_on_the_kill_channel() {
+        let s = svc();
+        for n in ["a", "b"] {
+            register(&s, n).await;
+        }
+        let id = submit(&s, 2).await;
+        schedule(&s);
+        let nodes = job(&s, id).await.nodes;
+        assert!(report(&s, &nodes[0], id, 3).await);
+        let listed = s
+            .list_nodes(Request::new(ListNodesRequest {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .nodes;
+        let pending = |n: &str| {
+            listed
+                .iter()
+                .find(|x| x.name == n)
+                .unwrap()
+                .kill_pending
+                .clone()
+        };
+        assert!(
+            pending(&nodes[0]).is_empty(),
+            "the failed rank already reported"
+        );
+        assert_eq!(pending(&nodes[1]), [id], "its peer is being stopped");
+    }
+
+    #[tokio::test]
     async fn failed_rank_kills_its_peers_through_fetch_work() {
         let s = svc();
         for n in ["a", "b", "c"] {
@@ -766,6 +1074,8 @@ mod container_tests {
             fsm: Arc::new(Fsm::new()),
             broker: Arc::new(EvalBroker::new()),
             submit_policy: None,
+            cluster: None,
+            policy_report: None,
         }
     }
 

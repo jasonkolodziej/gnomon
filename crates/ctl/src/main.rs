@@ -112,6 +112,60 @@ enum Role {
     Replica(gnomon_consensus::SchedulerRaft),
 }
 
+/// `ClusterStatus` for a replicated controller, from openraft's live metrics.
+struct RaftReport {
+    raft: gnomon_consensus::SchedulerRaft,
+}
+
+impl gnomon_api::ClusterReport for RaftReport {
+    fn status(&self) -> gnomon_api::pb::ClusterStatusReply {
+        use gnomon_api::pb::{ClusterMember, ClusterStatusReply};
+        use openraft::ServerState;
+        let m = self.raft.metrics().borrow().clone();
+        let role = match m.state {
+            ServerState::Leader => "leader",
+            ServerState::Follower => "follower",
+            ServerState::Candidate => "candidate",
+            ServerState::Learner => "learner",
+            ServerState::Shutdown => "shutdown",
+        };
+        let members = m
+            .membership_config
+            .nodes()
+            .map(|(id, node)| {
+                let matched = m
+                    .replication
+                    .as_ref()
+                    .and_then(|r| r.get(id).copied().flatten())
+                    .map(|l| l.index)
+                    .or_else(|| (*id == m.id).then_some(m.last_log_index).flatten());
+                ClusterMember {
+                    id: *id,
+                    addr: node.addr.clone(),
+                    leader: m.current_leader == Some(*id),
+                    has_matched: matched.is_some(),
+                    matched_index: matched.unwrap_or(0),
+                }
+            })
+            .collect();
+        ClusterStatusReply {
+            replicated: true,
+            node_id: m.id,
+            role: role.into(),
+            has_leader: m.current_leader.is_some(),
+            leader_id: m.current_leader.unwrap_or(0),
+            term: m.current_term,
+            last_log_index: m.last_log_index.unwrap_or(0),
+            last_applied: m.last_applied.map_or(0, |l| l.index),
+            fsm_index: 0, // filled in by the API from the FSM
+            members,
+        }
+    }
+}
+
+/// Recent events kept for `ListEvents` (the web UI's event feed).
+const EVENT_TAIL: usize = 20_000;
+
 impl Role {
     fn is_leader(&self) -> bool {
         match self {
@@ -330,6 +384,7 @@ async fn main() {
         }
     };
     let role = Arc::new(role);
+    fsm.enable_tail(EVENT_TAIL);
     let applier = Arc::new(PlanApplier::new());
     let policy = plugins.policy.clone();
 
@@ -423,6 +478,12 @@ async fn main() {
         });
     }
 
+    let cluster = match role.as_ref() {
+        Role::Replica(raft) => {
+            Some(Arc::new(RaftReport { raft: raft.clone() }) as Arc<dyn gnomon_api::ClusterReport>)
+        }
+        Role::Standalone => None,
+    };
     let addr = listen
         .parse()
         .unwrap_or_else(|e| fail(format!("--listen '{listen}': {e}")));
@@ -433,6 +494,8 @@ async fn main() {
                 fsm,
                 broker,
                 submit_policy: plugins.submit,
+                cluster,
+                policy_report: Some(plugins.report.clone() as Arc<dyn gnomon_api::PolicyReport>),
             }
             .server(),
         )
