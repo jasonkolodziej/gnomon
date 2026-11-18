@@ -12,6 +12,8 @@ members = [
     "crates/agent",
     "crates/cli",
     "crates/top",
+    "crates/web",
+    "crates/web-model",
     "crates/sim",
 ]
 # Built for wasm32 on its own (see its README), not with the workspace.

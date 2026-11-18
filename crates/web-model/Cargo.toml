@@ -1,0 +1,11 @@
+[package]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+name = "gnomon-web-model"
+description = "JSON types shared by gnomon-web and its browser UI (serde only, so the WASM UI can depend on it)"
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
