@@ -95,10 +95,10 @@ pub fn view(s: &State) -> El {
                 .w_full()
                 .center_y()
                 .gap(10.0)
-                .child(caption(&format!(
+                .child(col().grow(1.0).child(caption(&format!(
                     "events · {} kept · newest first",
                     s.events.len()
-                )))
+                ))))
                 .child(toggle),
         )
         .child(

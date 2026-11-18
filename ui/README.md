@@ -15,6 +15,27 @@ the page.
 | `6` | events | the state machine's event feed, newest first |
 | `7` | lab | one synthetic workload under each scheduling policy (walltime backfill, runtime quantile, bias-corrected predictor, wide-job shield), run on the server with the production code |
 
+![timeline](../docs/web-ui/timeline.png)
+
+| | |
+|---|---|
+| ![policy](../docs/web-ui/policy.png) | ![queue](../docs/web-ui/queue.png) |
+| ![nodes](../docs/web-ui/nodes.png) | ![cluster](../docs/web-ui/cluster.png) |
+| ![events](../docs/web-ui/events.png) | ![lab](../docs/web-ui/lab.png) |
+
+The screenshots show the built-in sample data (`?demo`). Its lab numbers are illustrative; the live
+lab shows what the server's `gnomon-sim` run returns. They are drawn by Rune's own renderer, natively
+and headless, from the app's scenes, so they are the same views the browser draws:
+
+```sh
+cd ui && for v in timeline nodes queue cluster policy events lab; do
+  cargo run -q -p gnomon-ui -- --scene $v --snap ../docs/web-ui/$v.png --size 1440x900
+done
+```
+
+(This needs a Vulkan driver, e.g. Mesa's lavapipe on a machine without a GPU, and the IBM Plex
+fonts installed, which the browser build embeds.)
+
 `↑`/`↓` move the queue selection, `x` cancels the selected job, `Esc` dismisses. The colours are the
 brand palette ([`assets/logo/BRAND.md`](../assets/logo/BRAND.md)): Ink background, Slate panels,
 Paper text, Signal Teal accent; job states follow `gntop`.
@@ -57,6 +78,11 @@ or Firefox with `dom.webgpu.enabled`. The page must come from `localhost` or HTT
 the page says so, and the JSON (`/api/state`, `/api/events`, `/api/stream`) still works.
 (Rune's `webgl` feature does not build at the pinned revision.)
 
+Tested so far: the wasm build boots in headless Chromium and connects. With only a software WebGPU
+adapter (SwiftShader, as in CI-style containers) Rune's canvas captures blank, sometimes falling back
+to its CPU renderer, which draws correctly. Rune's own `web-hello` example does the same there. The
+browser render on a real GPU has not been checked yet.
+
 ## Why a separate workspace
 
 Rune pins Rust 1.99.1 and edition 2024, and asks apps to apply its `[patch.crates-io]` entries
@@ -70,6 +96,7 @@ crates stay on stable. The UI shares only the JSON types, through
 | Path | Purpose |
 |---|---|
 | `app/src/lib.rs` | entry point, keys, `?demo`, scenes |
+| `app/src/main.rs` | native preview and headless snapshots (`--scene NAME --snap out.png`) |
 | `app/src/views/` | one module per view |
 | `app/src/net.rs` | `EventSource` on `/api/stream` and `fetch` for actions, applied with `AppHandle::update` |
 | `app/src/state.rs` | app state |

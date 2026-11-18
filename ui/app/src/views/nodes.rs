@@ -119,6 +119,7 @@ pub fn view(s: &State) -> El {
     }
     col()
         .w_full()
+        .h_full()
         .gap(12.0)
         .child(caption(&format!("nodes · {up}/{} up", v.nodes.len())))
         .child(

@@ -61,9 +61,10 @@ fn stage(plugins: &[PluginView], world: &str) -> El {
     match p {
         Some(p) => {
             let file = p.source.rsplit('/').next().unwrap_or(&p.source).to_string();
-            b = b
-                .child(ts(file, teal_light()).truncate())
-                .child(ts(p.mode.clone(), muted()).truncate());
+            b = b.child(ts(file, teal_light()).truncate());
+            if p.mode != what(world) {
+                b = b.child(ts(p.mode.clone(), muted()).truncate());
+            }
             let counters = p
                 .counters
                 .iter()
@@ -91,13 +92,13 @@ fn stage(plugins: &[PluginView], world: &str) -> El {
 
 fn fixed(label: &str, sub: &str) -> El {
     col()
-        .w(130.0)
+        .w(160.0)
         .gap(4.0)
         .padding(10.0)
         .radius(4.0)
         .border(1.0, line())
         .child(tb(label.to_string(), paper()))
-        .child(ts(sub.to_string(), dim()))
+        .child(ts(sub.to_string(), dim()).w_full().max_lines(3))
 }
 
 fn arrow() -> El {
@@ -155,7 +156,7 @@ pub fn view(s: &State) -> El {
         .child(row().gap(12.0).flex_wrap()
             .child(panel_box().w(250.0).child(ts("fuel per call", dim())).child(tb(format!("{}", v.policy.fuel), paper())))
             .child(panel_box().w(250.0).child(ts("memory per call", dim())).child(tb(format!("{} MiB", v.policy.memory_mb), paper())))
-            .child(panel_box().w(420.0)
+            .child(panel_box().w(700.0)
                 .child(ts("isolation", dim()))
                 .child(t("WASM components · fresh store per call · imports: types only", paper()))
                 .child(ts("a trap, fuel or memory overrun counts as a failure and the declarative fallback decides", dim()))))

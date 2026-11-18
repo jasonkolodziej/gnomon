@@ -99,6 +99,12 @@ pub fn spec() -> AppSpec<State> {
     let mut spec = AppSpec::new("gnomon", (1440.0, 900.0), State::default, views::root);
     spec.on_key = Some(on_key);
     spec.scenes = SCENES;
+    // The browser build embeds IBM Plex Mono as the mono family. Native previews
+    // (`--scene NAME --snap out.png`) use it too when it is installed.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        spec.families = ("Inter", "IBM Plex Mono");
+    }
     spec
 }
 

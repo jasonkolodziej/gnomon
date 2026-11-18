@@ -430,7 +430,8 @@ pub fn events() -> Vec<EventView> {
     ]
 }
 
-/// The lab table for the default request, from a real gnomon-web run.
+/// An illustrative lab table (the shape of a busy run), not a measurement: the
+/// live lab view shows what the server's `gnomon-sim` run returns.
 pub fn lab_report(req: &LabRequest) -> LabReport {
     let row =
         |label: &str, policy: &str, w: f64, p95: f64, b: f64, wide: f64, u: f64, m: f64| LabRow {

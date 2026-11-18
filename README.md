@@ -312,6 +312,11 @@ WebAssembly, drawn with WebGPU) in the brand palette, served by `gnomon-web`. Se
 `gnomon-web` binds to localhost by default (the API has no authentication); `--read-only` disables
 submit and cancel. Design: [ADR 0005](.github/plans/0005-web-ui.md).
 
+![The timeline view: every node's planner, running gangs, backfill reservations, the queue](docs/web-ui/timeline.png)
+![The policy view: the WASM plugin pipeline with live counters](docs/web-ui/policy.png)
+
+More screenshots (sample data) in [`ui/README.md`](ui/README.md).
+
 ### `gntop`: the time axis, live
 
 Gnomon schedules on the time axis (each vertex's planner holds running spans and future backfill

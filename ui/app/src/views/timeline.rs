@@ -7,7 +7,31 @@ use crate::theme::*;
 use rune::{Cx, El, col, el, row};
 
 const LABEL_W: f32 = 150.0;
-const LANE_H: f32 = 30.0;
+/// Height of one stacked row of spans inside a node's lane.
+const ROW_H: f32 = 24.0;
+
+/// Stack intervals `(start, end)` into rows, each span in the first row free
+/// at its start (spans sharing a node at once get rows of their own, as in
+/// gntop). Returns each span's row, in input order, and the number of rows.
+pub fn stack(spans: &[(u64, u64)]) -> (Vec<usize>, usize) {
+    let mut order: Vec<usize> = (0..spans.len()).collect();
+    order.sort_by_key(|&i| (spans[i].0, spans[i].1));
+    let mut row_end: Vec<u64> = Vec::new();
+    let mut rows = vec![0; spans.len()];
+    for i in order {
+        let (start, end) = spans[i];
+        let r = match row_end.iter().position(|&e| e <= start) {
+            Some(r) => r,
+            None => {
+                row_end.push(0);
+                row_end.len() - 1
+            }
+        };
+        row_end[r] = end;
+        rows[i] = r;
+    }
+    (rows, row_end.len().max(1))
+}
 const WINDOWS: [(u64, &str); 4] = [
     (900, "15m"),
     (3600, "1h"),
@@ -26,11 +50,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let x =
         |t: u64| ((t.saturating_sub(t0)) as f32 / (t1 - t0) as f32 * track_w).clamp(0.0, track_w);
 
-    let mut toolbar = row()
-        .w_full()
-        .center_y()
-        .gap(6.0)
-        .child(caption("plan · per-node planner spans"));
+    let mut toolbar = row().w_full().center_y().gap(6.0).child(
+        col()
+            .grow(1.0)
+            .child(caption("plan · per-node planner spans")),
+    );
     for (secs, label) in WINDOWS {
         let on = s.window == secs;
         toolbar = toolbar.child(
@@ -59,23 +83,29 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 
     let mut lanes = col().w_full().gap(4.0);
     for n in &v.nodes {
+        let here: Vec<_> = v
+            .jobs
+            .iter()
+            .filter(|j| j.start > 0 && j.nodes.iter().any(|m| *m == n.name))
+            .filter(|j| j.start + j.span.max(1) >= t0 && j.start <= t1)
+            .collect();
+        let (rows, nrows) = stack(
+            &here
+                .iter()
+                .map(|j| (j.start, j.start + j.span.max(1)))
+                .collect::<Vec<_>>(),
+        );
+        let lane_h = nrows as f32 * ROW_H + 6.0;
         let mut track = el()
             .key(format!("lane-{}", n.name))
             .w(track_w)
-            .h(LANE_H)
+            .h(lane_h)
             .radius(3.0)
             .fill(panel())
             .border(1.0, if n.alive { line() } else { red().alpha(0.5) })
             .clip_rounded(3.0);
-        for j in v
-            .jobs
-            .iter()
-            .filter(|j| j.start > 0 && j.nodes.iter().any(|m| *m == n.name))
-        {
+        for (j, &r) in here.iter().zip(&rows) {
             let end = j.start + j.span.max(1);
-            if end < t0 || j.start > t1 {
-                continue;
-            }
             let (a, b) = (x(j.start), x(end));
             let w = (b - a).max(3.0);
             let color = state_color(&j.state);
@@ -91,8 +121,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             let id = j.id;
             let mut span = el()
                 .key(format!("span-{}-{}", j.id, n.name))
-                .absolute(a, 3.0)
-                .size(w, LANE_H - 6.0)
+                .absolute(a, 3.0 + r as f32 * ROW_H)
+                .size(w, ROW_H - 4.0)
                 .radius(2.0)
                 .px(6.0)
                 .center_y()
@@ -119,7 +149,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         if n.alive {
             track = track.child(
                 el().absolute(x(now) - 1.0, 0.0)
-                    .size(2.0, LANE_H)
+                    .size(2.0, lane_h)
                     .fill(teal_light()),
             );
         }
@@ -214,4 +244,18 @@ fn legend_item(label: &str, c: rune::Color, outlined: bool) -> El {
                 .border(1.0, c),
         )
         .child(ts(label, muted()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stack;
+
+    #[test]
+    fn concurrent_spans_get_their_own_rows_and_sequential_ones_share() {
+        // a: 0-10, b: 5-15 (overlaps a), c: 10-20 (after a), d: 12-14 (overlaps b and c)
+        let (rows, n) = stack(&[(0, 10), (5, 15), (10, 20), (12, 14)]);
+        assert_eq!(rows, [0, 1, 0, 2]);
+        assert_eq!(n, 3);
+        assert_eq!(stack(&[]), (vec![], 1), "an empty lane keeps one row");
+    }
 }

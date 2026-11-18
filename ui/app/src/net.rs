@@ -5,7 +5,9 @@
 //! every call is a no-op that says so.
 
 use crate::state::State;
-use gnomon_web_model::{ActionReply, LabRequest, SubmitForm};
+#[cfg(target_arch = "wasm32")]
+use gnomon_web_model::ActionReply;
+use gnomon_web_model::{LabRequest, SubmitForm};
 
 #[cfg(target_arch = "wasm32")]
 mod web {
