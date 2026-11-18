@@ -16,7 +16,7 @@ without delaying anything above it.
 
 All SVG text is outlined; no fonts required to render.
 
-**Colours** — Ink `#0B1220` · Signal Teal `#14B8A6` · Teal Light `#5EEAD4` (on dark) ·
+**Colours** — Ink `#0A0D12` · Signal Teal `#14B8A6` · Teal Light `#5EEAD4` (on dark) ·
 Slate `#1E293B` · Paper `#F8FAFC`.
 
 **Type** — Wordmark: Space Grotesk 600, −2% tracking, lowercase.

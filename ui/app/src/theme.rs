@@ -11,7 +11,7 @@ fn c(s: &str) -> Color {
 
 /// Ink: the page.
 pub fn ink() -> Color {
-    c("#0B1220")
+    c("#0A0D12")
 }
 /// Panels sit on the page itself: Ink, set apart by hairline rules (`line`),
 /// as in a terminal. Slate is the one raised tone.
